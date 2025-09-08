@@ -171,27 +171,21 @@ public static class Logger
         {
             string mRelativePath = _LogDirectory;
             string mBaseDir = AppDomain.CurrentDomain.BaseDirectory;
-
             if (!string.IsNullOrEmpty(mRelativePath) && mRelativePath.StartsWith(mBaseDir, StringComparison.OrdinalIgnoreCase))
             {
                 mRelativePath = "~" + mRelativePath.Substring(mBaseDir.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             }
-
             XmlDocument oDoc = new XmlDocument();
             XmlDeclaration oDecl = oDoc.CreateXmlDeclaration("1.0", "utf-8", null);
             oDoc.AppendChild(oDecl);
-
             XmlElement oRoot = oDoc.CreateElement("LoggerConfig");
             oDoc.AppendChild(oRoot);
-
             XmlElement oDirElem = oDoc.CreateElement("LogDirectory");
             oDirElem.InnerText = mRelativePath ?? "~\\log";
             oRoot.AppendChild(oDirElem);
-
             XmlElement oEnableElem = oDoc.CreateElement("EnableLogging");
             oEnableElem.InnerText = _EnableLogging.ToString();
             oRoot.AppendChild(oEnableElem);
-
             XmlElement oIncludeAssemblyElem = oDoc.CreateElement("IncludeAssemblyInLog");
             oIncludeAssemblyElem.InnerText = _IncludeAssemblyInLog.ToString();
             oRoot.AppendChild(oIncludeAssemblyElem);
@@ -289,7 +283,9 @@ public static class Logger
             _LogQueue.Enqueue(mLogMessage);
             _WriteEvent.Set();
         }
-        catch { }
+        catch
+        {
+        }
     }
 
     public static void LogError(string mMessage, [CallerMemberName] string mMemberName = "", [CallerFilePath] string mFilePath = "", [CallerLineNumber] int mLineNumber = 0)
@@ -302,7 +298,9 @@ public static class Logger
             _LogQueue.Enqueue(mLogMessage);
             _WriteEvent.Set();
         }
-        catch { }
+        catch
+        {
+        }
     }
 
     private static string BuildCallerInfo(string mMemberName, string mFilePath, int mLineNumber)
@@ -311,7 +309,6 @@ public static class Logger
         {
             string mClassName = Path.GetFileNameWithoutExtension(mFilePath ?? "");
             string mAssemblyPrefix = "";
-
             if (_IncludeAssemblyInLog)
             {
                 try
@@ -327,7 +324,6 @@ public static class Logger
                     mAssemblyPrefix = "Unknown:";
                 }
             }
-
             return $" [{mAssemblyPrefix} -> {mClassName} -> {mMemberName} Line{mLineNumber}]";
         }
         catch
