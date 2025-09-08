@@ -21,8 +21,10 @@ public static class Logger
     private static readonly Thread _WriterThread; // نخ پس‌زمینه — مسئول نوشتن Batch لاگ‌ها در دیسک
     private static volatile bool _ShouldStop = false; // پرچم volatile — اعلام توقف نخ پس‌زمینه در زمان Shutdown
     private static readonly AutoResetEvent _WriteEvent = new AutoResetEvent(false); // رویداد همگام‌سازی — بیدار کردن نخ نویسنده هنگام افزودن لاگ یا timeout
-    private static readonly TimeSpan _WriteInterval = TimeSpan.FromMilliseconds(50); // فاصله زمانی بررسی صف در حالت Idle — 50 میلی‌ثانیه
-
+    // فاصله زمانی بررسی صف در حالت Idle — 50 میلی‌ثانیه
+    private static readonly TimeSpan _WriteInterval = TimeSpan.FromMilliseconds(50);
+    // کنترل نمایش نام اسمبلی در لاگ — پیش‌فرض false برای
+    private static bool _IncludeAssemblyInLog = false;
     private static readonly Newtonsoft.Json.JsonSerializerSettings _JsonSettings = new Newtonsoft.Json.JsonSerializerSettings
     {
         MaxDepth = 5,// حداکثر عمق سریالایز — جلوگیری از StackOverflow در اشیاء تو در تو
@@ -78,12 +80,14 @@ public static class Logger
         get { return Path.Combine(LogDirectory, _LogBaseName); }
     }
 
-    public static void Initialize(string mLogDirectory = null, bool? mEnableLogging = null)
+    public static void Initialize(string mLogDirectory = null, bool? mEnableLogging = null, bool? mIncludeAssemblyInLog = null)
     {
         lock (_InitLock)
         {
             if (mLogDirectory != null) _LogDirectory = mLogDirectory;
             if (mEnableLogging != null) _EnableLogging = mEnableLogging;
+            if (mIncludeAssemblyInLog != null) _IncludeAssemblyInLog = mIncludeAssemblyInLog.Value;
+
             if (_LogDirectory != null && _EnableLogging != null)
                 SaveToConfigFile();
         }
@@ -101,6 +105,7 @@ public static class Logger
         {
             _LogDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
             _EnableLogging = true;
+            _IncludeAssemblyInLog = false;
             SaveToConfigFile();
         }
     }
@@ -116,6 +121,7 @@ public static class Logger
 
             XmlNode oDirNode = oRoot.SelectSingleNode("LogDirectory");
             XmlNode oEnableNode = oRoot.SelectSingleNode("EnableLogging");
+            XmlNode oIncludeAssemblyNode = oRoot.SelectSingleNode("IncludeAssemblyInLog");
 
             string mRawPath = null;
             if (oDirNode != null && !string.IsNullOrWhiteSpace(oDirNode.InnerText))
@@ -135,6 +141,9 @@ public static class Logger
             if (oEnableNode != null && bool.TryParse(oEnableNode.InnerText, out bool mEnabled))
                 _EnableLogging = mEnabled;
 
+            if (oIncludeAssemblyNode != null && bool.TryParse(oIncludeAssemblyNode.InnerText, out bool mInclude))
+                _IncludeAssemblyInLog = mInclude;
+
             _LogDirectory = _LogDirectory ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
             _EnableLogging = _EnableLogging ?? true;
         }
@@ -142,6 +151,7 @@ public static class Logger
         {
             _LogDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
             _EnableLogging = true;
+            _IncludeAssemblyInLog = false;
             SaveToConfigFile();
         }
     }
@@ -158,17 +168,26 @@ public static class Logger
             {
                 mRelativePath = "~" + mRelativePath.Substring(mBaseDir.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             }
+
             XmlDocument oDoc = new XmlDocument();
             XmlDeclaration oDecl = oDoc.CreateXmlDeclaration("1.0", "utf-8", null);
             oDoc.AppendChild(oDecl);
+
             XmlElement oRoot = oDoc.CreateElement("LoggerConfig");
             oDoc.AppendChild(oRoot);
+
             XmlElement oDirElem = oDoc.CreateElement("LogDirectory");
             oDirElem.InnerText = mRelativePath;
             oRoot.AppendChild(oDirElem);
+
             XmlElement oEnableElem = oDoc.CreateElement("EnableLogging");
             oEnableElem.InnerText = _EnableLogging.ToString();
             oRoot.AppendChild(oEnableElem);
+
+            XmlElement oIncludeAssemblyElem = oDoc.CreateElement("IncludeAssemblyInLog");
+            oIncludeAssemblyElem.InnerText = _IncludeAssemblyInLog.ToString();
+            oRoot.AppendChild(oIncludeAssemblyElem);
+
             oDoc.Save(_ConfigFilePath);
         }
         catch { }
@@ -181,8 +200,7 @@ public static class Logger
         [CallerLineNumber] int mLineNumber = 0)
     {
         if (!EnableLogging) return;
-        string mClassName = Path.GetFileNameWithoutExtension(mFilePath);
-        string mCallerInfo = $" [{mClassName}->{mMemberName}: Line{mLineNumber}]";
+        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
         string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] INFO: {mMessage}{mCallerInfo}";
         _LogQueue.Enqueue(mLogMessage);
         _WriteEvent.Set();
@@ -195,14 +213,12 @@ public static class Logger
         [CallerLineNumber] int mLineNumber = 0)
     {
         if (!EnableLogging) return;
-        string mClassName = Path.GetFileNameWithoutExtension(mFilePath);
-        string mCallerInfo = $" [{mClassName}->{mMemberName}: Line{mLineNumber}]";
+        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
         string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] INFO: {SerializeObject(oData)}{mCallerInfo}";
         _LogQueue.Enqueue(mLogMessage);
         _WriteEvent.Set();
     }
 
-    // --- LogStart ---
     public static void LogStart(
         object oData,
         [CallerMemberName] string mMemberName = "",
@@ -210,14 +226,12 @@ public static class Logger
         [CallerLineNumber] int mLineNumber = 0)
     {
         if (!EnableLogging) return;
-        string mClassName = Path.GetFileNameWithoutExtension(mFilePath);
-        string mCallerInfo = $" [{mClassName}->{mMemberName}: Line{mLineNumber}]";
+        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
         string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] START: {SerializeObject(oData)}{mCallerInfo}";
         _LogQueue.Enqueue(mLogMessage);
         _WriteEvent.Set();
     }
 
-    // --- LogEnd ---
     public static void LogEnd(
         object oData,
         [CallerMemberName] string mMemberName = "",
@@ -225,14 +239,12 @@ public static class Logger
         [CallerLineNumber] int mLineNumber = 0)
     {
         if (!EnableLogging) return;
-        string mClassName = Path.GetFileNameWithoutExtension(mFilePath);
-        string mCallerInfo = $" [{mClassName}->{mMemberName}: Line{mLineNumber}]";
+        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
         string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] END: {SerializeObject(oData)}{mCallerInfo}";
         _LogQueue.Enqueue(mLogMessage);
         _WriteEvent.Set();
     }
 
-    // --- LogRequest با Caller Info ---
     public static void LogRequest(
         object oRequest,
         [CallerMemberName] string mMemberName = "",
@@ -240,14 +252,12 @@ public static class Logger
         [CallerLineNumber] int mLineNumber = 0)
     {
         if (!EnableLogging) return;
-        string mClassName = Path.GetFileNameWithoutExtension(mFilePath);
-        string mCallerInfo = $" [{mClassName}->{mMemberName}: Line{mLineNumber}]";
+        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
         string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] START REQUEST: {SerializeObject(oRequest)}{mCallerInfo}";
         _LogQueue.Enqueue(mLogMessage);
         _WriteEvent.Set();
     }
 
-    // --- LogResponse با Caller Info ---
     public static void LogResponse(
         object oResponse,
         [CallerMemberName] string mMemberName = "",
@@ -255,14 +265,12 @@ public static class Logger
         [CallerLineNumber] int mLineNumber = 0)
     {
         if (!EnableLogging) return;
-        string mClassName = Path.GetFileNameWithoutExtension(mFilePath);
-        string mCallerInfo = $" [{mClassName}->{mMemberName}: Line{mLineNumber}]";
+        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
         string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] RESPONSE: {SerializeObject(oResponse)}{mCallerInfo}";
         _LogQueue.Enqueue(mLogMessage);
         _WriteEvent.Set();
     }
 
-    // --- LogError ---
     public static void LogError(
         object oException,
         [CallerMemberName] string mMemberName = "",
@@ -270,8 +278,7 @@ public static class Logger
         [CallerLineNumber] int mLineNumber = 0)
     {
         if (!EnableLogging || oException == null) return;
-        string mClassName = Path.GetFileNameWithoutExtension(mFilePath);
-        string mCallerInfo = $" [{mClassName}->{mMemberName}: Line{mLineNumber}]";
+        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
         string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] ERROR: {SerializeObject(oException)}{mCallerInfo}";
         _LogQueue.Enqueue(mLogMessage);
         _WriteEvent.Set();
@@ -284,13 +291,37 @@ public static class Logger
         [CallerLineNumber] int mLineNumber = 0)
     {
         if (!EnableLogging) return;
-        string mClassName = Path.GetFileNameWithoutExtension(mFilePath);
-        string mCallerInfo = $" [{mClassName}->{mMemberName}: Line{mLineNumber}]";
+        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
         string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] ERROR: {mMessage}{mCallerInfo}";
         _LogQueue.Enqueue(mLogMessage);
         _WriteEvent.Set();
     }
 
+    private static string BuildCallerInfo(string mMemberName, string mFilePath, int mLineNumber)
+    {
+        string mClassName = Path.GetFileNameWithoutExtension(mFilePath);
+        string mAssemblyPrefix = "";
+
+        if (_IncludeAssemblyInLog)
+        {
+            try
+            {
+                var oStack = new System.Diagnostics.StackTrace(1, false);
+                var oFrame = oStack.GetFrame(0);
+                var oMethod = oFrame.GetMethod();
+                string mAssemblyName = oMethod.DeclaringType?.Assembly?.GetName().Name ?? "Unknown";
+                mAssemblyPrefix = mAssemblyName + ":";
+            }
+            catch
+            {
+                mAssemblyPrefix = "Unknown:";
+            }
+        }
+
+        return $" [{mAssemblyPrefix} -> {mClassName} -> {mMemberName} Line{mLineNumber}]";
+    }
+
+    // --- Background Writer ---
     private static void BackgroundWriterLoop()
     {
         while (!_ShouldStop)
