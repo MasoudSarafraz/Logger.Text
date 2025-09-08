@@ -15,7 +15,7 @@ public static class Logger
     private const string mConfigFileName = "logger_config.xml"; // نام فایل پیکربندی — ذخیره مسیر و وضعیت لاگ
     private static readonly string _ConfigFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, mConfigFileName); // مسیر کامل فایل کانفیگ — کنار exe/dll
     private static readonly string _LogBaseName = "application_log.txt"; // نام فایل لاگ اصلی — مقصد نوشتن لاگ‌ها
-    private static readonly long _MaxLogSize = 3L * 1024 * 1024; // حداکثر حجم فایل لاگ قبل از چرخش — 3 مگابایت
+    private static readonly long _MaxLogSize = 5L * 1024 * 1024; // حداکثر حجم فایل لاگ قبل از چرخش — 5 مگابایت
     private static readonly int _MaxBackups = 10; // حداکثر تعداد فایل‌های بک‌آپ لاگ — قدیمی‌ترها پاک می‌شوند
     private static readonly ConcurrentQueue<string> _LogQueue = new ConcurrentQueue<string>(); // صف Thread-Safe — نگهداری لاگ‌ها برای نوشتن در پس‌زمینه
     private static readonly Thread _WriterThread; // نخ پس‌زمینه — مسئول نوشتن Batch لاگ‌ها در دیسک
@@ -32,15 +32,18 @@ public static class Logger
         ReferenceLoopHandling = Newtonsoft.Json.ReferenceLoopHandling.Ignore, // نادیده گرفتن حلقه‌های مرجع — جلوگیری از Exception
         Formatting = Newtonsoft.Json.Formatting.Indented // بدون ایندنت — کاهش حجم و افزایش سرعت سریالایز
     };
-
     static Logger()
     {
-        _WriterThread = new Thread(BackgroundWriterLoop)
+        try
         {
-            IsBackground = true,
-            Name = "Logger-Background-Writer"
-        };
-        _WriterThread.Start();
+            _WriterThread = new Thread(BackgroundWriterLoop)
+            {
+                IsBackground = true,
+                Name = "Logger-Background-Writer"
+            };
+            _WriterThread.Start();
+        }
+        catch { }
     }
 
     private static string LogDirectory
@@ -55,7 +58,7 @@ public static class Logger
                         InitializeFromConfig();
                 }
             }
-            return _LogDirectory;
+            return _LogDirectory ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
         }
     }
 
@@ -71,42 +74,52 @@ public static class Logger
                         InitializeFromConfig();
                 }
             }
-            return _EnableLogging.Value;
+            return _EnableLogging.GetValueOrDefault(true);
         }
     }
 
-    private static string LogFilePath
-    {
-        get { return Path.Combine(LogDirectory, _LogBaseName); }
-    }
+    private static string LogFilePath => Path.Combine(LogDirectory, _LogBaseName);
 
     public static void Initialize(string mLogDirectory = null, bool? mEnableLogging = null, bool? mIncludeAssemblyInLog = null)
     {
-        lock (_InitLock)
+        try
         {
-            if (mLogDirectory != null) _LogDirectory = mLogDirectory;
-            if (mEnableLogging != null) _EnableLogging = mEnableLogging;
-            if (mIncludeAssemblyInLog != null) _IncludeAssemblyInLog = mIncludeAssemblyInLog.Value;
+            lock (_InitLock)
+            {
+                if (mLogDirectory != null) _LogDirectory = mLogDirectory;
+                if (mEnableLogging != null) _EnableLogging = mEnableLogging;
+                if (mIncludeAssemblyInLog != null) _IncludeAssemblyInLog = mIncludeAssemblyInLog.Value;
 
-            if (_LogDirectory != null && _EnableLogging != null)
-                SaveToConfigFile();
+                if (_LogDirectory != null && _EnableLogging != null)
+                    SaveToConfigFile();
+            }
         }
+        catch { }
     }
 
     private static void InitializeFromConfig()
     {
-        if (_LogDirectory != null && _EnableLogging != null) return;
-
-        if (File.Exists(_ConfigFilePath))
+        try
         {
-            LoadFromConfigFile();
+            if (_LogDirectory != null && _EnableLogging != null) return;
+
+            if (File.Exists(_ConfigFilePath))
+            {
+                LoadFromConfigFile();
+            }
+            else
+            {
+                _LogDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
+                _EnableLogging = true;
+                _IncludeAssemblyInLog = false;
+                SaveToConfigFile();
+            }
         }
-        else
+        catch
         {
             _LogDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
             _EnableLogging = true;
             _IncludeAssemblyInLog = false;
-            SaveToConfigFile();
         }
     }
 
@@ -117,16 +130,13 @@ public static class Logger
             XmlDocument oDoc = new XmlDocument();
             oDoc.Load(_ConfigFilePath);
             XmlNode oRoot = oDoc.DocumentElement;
-            if (oRoot == null) throw new Exception("Root element is null.");
+            if (oRoot == null) throw new Exception("Invalid config");
 
             XmlNode oDirNode = oRoot.SelectSingleNode("LogDirectory");
             XmlNode oEnableNode = oRoot.SelectSingleNode("EnableLogging");
             XmlNode oIncludeAssemblyNode = oRoot.SelectSingleNode("IncludeAssemblyInLog");
 
-            string mRawPath = null;
-            if (oDirNode != null && !string.IsNullOrWhiteSpace(oDirNode.InnerText))
-                mRawPath = oDirNode.InnerText.Trim();
-
+            string mRawPath = oDirNode?.InnerText?.Trim();
             if (!string.IsNullOrEmpty(mRawPath) && mRawPath.StartsWith("~"))
             {
                 string mBaseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -152,7 +162,6 @@ public static class Logger
             _LogDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
             _EnableLogging = true;
             _IncludeAssemblyInLog = false;
-            SaveToConfigFile();
         }
     }
 
@@ -163,8 +172,7 @@ public static class Logger
             string mRelativePath = _LogDirectory;
             string mBaseDir = AppDomain.CurrentDomain.BaseDirectory;
 
-            if (!string.IsNullOrEmpty(mRelativePath) &&
-                mRelativePath.StartsWith(mBaseDir, StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrEmpty(mRelativePath) && mRelativePath.StartsWith(mBaseDir, StringComparison.OrdinalIgnoreCase))
             {
                 mRelativePath = "~" + mRelativePath.Substring(mBaseDir.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             }
@@ -177,7 +185,7 @@ public static class Logger
             oDoc.AppendChild(oRoot);
 
             XmlElement oDirElem = oDoc.CreateElement("LogDirectory");
-            oDirElem.InnerText = mRelativePath;
+            oDirElem.InnerText = mRelativePath ?? "~\\log";
             oRoot.AppendChild(oDirElem);
 
             XmlElement oEnableElem = oDoc.CreateElement("EnableLogging");
@@ -193,135 +201,141 @@ public static class Logger
         catch { }
     }
 
-    public static void LogInfo(
-        string mMessage,
-        [CallerMemberName] string mMemberName = "",
-        [CallerFilePath] string mFilePath = "",
-        [CallerLineNumber] int mLineNumber = 0)
+    public static void LogInfo(string mMessage, [CallerMemberName] string mMemberName = "", [CallerFilePath] string mFilePath = "", [CallerLineNumber] int mLineNumber = 0)
     {
-        if (!EnableLogging) return;
-        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
-        string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] INFO: {mMessage}{mCallerInfo}";
-        _LogQueue.Enqueue(mLogMessage);
-        _WriteEvent.Set();
+        try
+        {
+            if (!EnableLogging) return;
+            string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
+            string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] INFO: {mMessage}{mCallerInfo}";
+            _LogQueue.Enqueue(mLogMessage);
+            _WriteEvent.Set();
+        }
+        catch { }
     }
 
-    public static void LogInfo(
-        object oData,
-        [CallerMemberName] string mMemberName = "",
-        [CallerFilePath] string mFilePath = "",
-        [CallerLineNumber] int mLineNumber = 0)
+    public static void LogInfo(object oData, [CallerMemberName] string mMemberName = "", [CallerFilePath] string mFilePath = "", [CallerLineNumber] int mLineNumber = 0)
     {
-        if (!EnableLogging) return;
-        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
-        string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] INFO: {SerializeObject(oData)}{mCallerInfo}";
-        _LogQueue.Enqueue(mLogMessage);
-        _WriteEvent.Set();
+        try
+        {
+            if (!EnableLogging) return;
+            string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
+            string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] INFO: {SerializeObject(oData)}{mCallerInfo}";
+            _LogQueue.Enqueue(mLogMessage);
+            _WriteEvent.Set();
+        }
+        catch { }
     }
 
-    public static void LogStart(
-        object oData,
-        [CallerMemberName] string mMemberName = "",
-        [CallerFilePath] string mFilePath = "",
-        [CallerLineNumber] int mLineNumber = 0)
+    public static void LogStart(object oData, [CallerMemberName] string mMemberName = "", [CallerFilePath] string mFilePath = "", [CallerLineNumber] int mLineNumber = 0)
     {
-        if (!EnableLogging) return;
-        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
-        string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] START: {SerializeObject(oData)}{mCallerInfo}";
-        _LogQueue.Enqueue(mLogMessage);
-        _WriteEvent.Set();
+        try
+        {
+            if (!EnableLogging) return;
+            string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
+            string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] START: {SerializeObject(oData)}{mCallerInfo}";
+            _LogQueue.Enqueue(mLogMessage);
+            _WriteEvent.Set();
+        }
+        catch { }
     }
 
-    public static void LogEnd(
-        object oData,
-        [CallerMemberName] string mMemberName = "",
-        [CallerFilePath] string mFilePath = "",
-        [CallerLineNumber] int mLineNumber = 0)
+    public static void LogEnd(object oData, [CallerMemberName] string mMemberName = "", [CallerFilePath] string mFilePath = "", [CallerLineNumber] int mLineNumber = 0)
     {
-        if (!EnableLogging) return;
-        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
-        string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] END: {SerializeObject(oData)}{mCallerInfo}";
-        _LogQueue.Enqueue(mLogMessage);
-        _WriteEvent.Set();
+        try
+        {
+            if (!EnableLogging) return;
+            string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
+            string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] END: {SerializeObject(oData)}{mCallerInfo}";
+            _LogQueue.Enqueue(mLogMessage);
+            _WriteEvent.Set();
+        }
+        catch { }
     }
 
-    public static void LogRequest(
-        object oRequest,
-        [CallerMemberName] string mMemberName = "",
-        [CallerFilePath] string mFilePath = "",
-        [CallerLineNumber] int mLineNumber = 0)
+    public static void LogRequest(object oRequest, [CallerMemberName] string mMemberName = "", [CallerFilePath] string mFilePath = "", [CallerLineNumber] int mLineNumber = 0)
     {
-        if (!EnableLogging) return;
-        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
-        string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] START REQUEST: {SerializeObject(oRequest)}{mCallerInfo}";
-        _LogQueue.Enqueue(mLogMessage);
-        _WriteEvent.Set();
+        try
+        {
+            if (!EnableLogging) return;
+            string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
+            string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] START REQUEST: {SerializeObject(oRequest)}{mCallerInfo}";
+            _LogQueue.Enqueue(mLogMessage);
+            _WriteEvent.Set();
+        }
+        catch { }
     }
 
-    public static void LogResponse(
-        object oResponse,
-        [CallerMemberName] string mMemberName = "",
-        [CallerFilePath] string mFilePath = "",
-        [CallerLineNumber] int mLineNumber = 0)
+    public static void LogResponse(object oResponse, [CallerMemberName] string mMemberName = "", [CallerFilePath] string mFilePath = "", [CallerLineNumber] int mLineNumber = 0)
     {
-        if (!EnableLogging) return;
-        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
-        string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] RESPONSE: {SerializeObject(oResponse)}{mCallerInfo}";
-        _LogQueue.Enqueue(mLogMessage);
-        _WriteEvent.Set();
+        try
+        {
+            if (!EnableLogging) return;
+            string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
+            string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] RESPONSE: {SerializeObject(oResponse)}{mCallerInfo}";
+            _LogQueue.Enqueue(mLogMessage);
+            _WriteEvent.Set();
+        }
+        catch { }
     }
 
-    public static void LogError(
-        object oException,
-        [CallerMemberName] string mMemberName = "",
-        [CallerFilePath] string mFilePath = "",
-        [CallerLineNumber] int mLineNumber = 0)
+    public static void LogError(object oException, [CallerMemberName] string mMemberName = "", [CallerFilePath] string mFilePath = "", [CallerLineNumber] int mLineNumber = 0)
     {
-        if (!EnableLogging || oException == null) return;
-        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
-        string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] ERROR: {SerializeObject(oException)}{mCallerInfo}";
-        _LogQueue.Enqueue(mLogMessage);
-        _WriteEvent.Set();
+        try
+        {
+            if (!EnableLogging || oException == null) return;
+            string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
+            string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] ERROR: {SerializeObject(oException)}{mCallerInfo}";
+            _LogQueue.Enqueue(mLogMessage);
+            _WriteEvent.Set();
+        }
+        catch { }
     }
 
-    public static void LogError(
-        string mMessage,
-        [CallerMemberName] string mMemberName = "",
-        [CallerFilePath] string mFilePath = "",
-        [CallerLineNumber] int mLineNumber = 0)
+    public static void LogError(string mMessage, [CallerMemberName] string mMemberName = "", [CallerFilePath] string mFilePath = "", [CallerLineNumber] int mLineNumber = 0)
     {
-        if (!EnableLogging) return;
-        string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
-        string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] ERROR: {mMessage}{mCallerInfo}";
-        _LogQueue.Enqueue(mLogMessage);
-        _WriteEvent.Set();
+        try
+        {
+            if (!EnableLogging) return;
+            string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
+            string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] ERROR: {mMessage}{mCallerInfo}";
+            _LogQueue.Enqueue(mLogMessage);
+            _WriteEvent.Set();
+        }
+        catch { }
     }
 
     private static string BuildCallerInfo(string mMemberName, string mFilePath, int mLineNumber)
     {
-        string mClassName = Path.GetFileNameWithoutExtension(mFilePath);
-        string mAssemblyPrefix = "";
-
-        if (_IncludeAssemblyInLog)
+        try
         {
-            try
-            {
-                var oStack = new System.Diagnostics.StackTrace(1, false);
-                var oFrame = oStack.GetFrame(0);
-                var oMethod = oFrame.GetMethod();
-                string mAssemblyName = oMethod.DeclaringType?.Assembly?.GetName().Name ?? "Unknown";
-                mAssemblyPrefix = mAssemblyName + ":";
-            }
-            catch
-            {
-                mAssemblyPrefix = "Unknown:";
-            }
-        }
+            string mClassName = Path.GetFileNameWithoutExtension(mFilePath ?? "");
+            string mAssemblyPrefix = "";
 
-        return $" [{mAssemblyPrefix} -> {mClassName} -> {mMemberName} Line{mLineNumber}]";
+            if (_IncludeAssemblyInLog)
+            {
+                try
+                {
+                    var oStack = new System.Diagnostics.StackTrace(1, false);
+                    var oFrame = oStack.GetFrame(0);
+                    var oMethod = oFrame.GetMethod();
+                    string mAssemblyName = oMethod?.DeclaringType?.Assembly?.GetName().Name ?? "Unknown";
+                    mAssemblyPrefix = mAssemblyName + ":";
+                }
+                catch
+                {
+                    mAssemblyPrefix = "Unknown:";
+                }
+            }
+
+            return $" [{mAssemblyPrefix} -> {mClassName} -> {mMemberName} Line{mLineNumber}]";
+        }
+        catch
+        {
+            return "";
+        }
     }
 
-    // --- Background Writer ---
     private static void BackgroundWriterLoop()
     {
         while (!_ShouldStop)
@@ -337,7 +351,7 @@ public static class Logger
 
                 while (_LogQueue.TryDequeue(out mItem) && mCount < 100)
                 {
-                    mBatch.AppendLine(mItem);
+                    if (mItem != null) mBatch.AppendLine(mItem);
                     mCount++;
                 }
 
@@ -351,23 +365,37 @@ public static class Logger
 
     private static void WriteBatchToDisk(string mBatchText)
     {
-        lock (_InitLock)
+        if (string.IsNullOrEmpty(mBatchText)) return;
+
+        try
         {
-            try
+            lock (_InitLock)
             {
-                Directory.CreateDirectory(LogDirectory);
-
-                if (File.Exists(LogFilePath))
+                try
                 {
-                    long mCurrentSize = new FileInfo(LogFilePath).Length;
-                    if (mCurrentSize >= _MaxLogSize)
-                        CreateBackup();
+                    Directory.CreateDirectory(LogDirectory);
                 }
+                catch { }
 
-                File.AppendAllText(LogFilePath, mBatchText, Encoding.UTF8);
+                try
+                {
+                    if (File.Exists(LogFilePath))
+                    {
+                        try
+                        {
+                            long mCurrentSize = new FileInfo(LogFilePath).Length;
+                            if (mCurrentSize >= _MaxLogSize)
+                                CreateBackup();
+                        }
+                        catch { }
+                    }
+
+                    File.AppendAllText(LogFilePath, mBatchText, Encoding.UTF8);
+                }
+                catch { }
             }
-            catch { }
         }
+        catch { }
     }
 
     private static void CreateBackup()
@@ -384,43 +412,59 @@ public static class Logger
                 mBackupPath = Path.Combine(LogDirectory, mBackupName);
             }
 
-            File.Move(LogFilePath, mBackupPath);
-
-            var oOldBackups = new DirectoryInfo(LogDirectory)
-                .GetFiles("backup_application_log_*.txt")
-                .OrderByDescending(f => f.LastWriteTimeUtc)
-                .Skip(_MaxBackups);
-
-            foreach (var mFile in oOldBackups)
+            try
             {
-                try { mFile.Delete(); } catch { }
+                File.Move(LogFilePath, mBackupPath);
             }
+            catch { }
+
+            try
+            {
+                var oOldBackups = new DirectoryInfo(LogDirectory)
+                    .GetFiles("backup_application_log_*.txt")
+                    .OrderByDescending(f => f.LastWriteTimeUtc)
+                    .Skip(_MaxBackups);
+
+                foreach (var mFile in oOldBackups)
+                {
+                    try { mFile.Delete(); } catch { }
+                }
+            }
+            catch { }
         }
         catch { }
     }
 
     private static void FlushRemainingLogs()
     {
-        var mBatch = new StringBuilder();
-        string mItem;
-        while (_LogQueue.TryDequeue(out mItem))
+        try
         {
-            mBatch.AppendLine(mItem);
+            var mBatch = new StringBuilder();
+            string mItem;
+            while (_LogQueue.TryDequeue(out mItem))
+            {
+                if (mItem != null) mBatch.AppendLine(mItem);
+            }
+            if (mBatch.Length > 0)
+            {
+                WriteBatchToDisk(mBatch.ToString());
+            }
         }
-        if (mBatch.Length > 0)
-        {
-            WriteBatchToDisk(mBatch.ToString());
-        }
+        catch { }
     }
 
     public static void Shutdown()
     {
-        _ShouldStop = true;
-        _WriteEvent.Set();
-        if (!_WriterThread.Join(2000))
+        try
         {
-            _WriterThread.Abort();
+            _ShouldStop = true;
+            _WriteEvent.Set();
+            if (!_WriterThread.Join(2000))
+            {
+                try { _WriterThread.Abort(); } catch { }
+            }
         }
+        catch { }
     }
 
     private static string SerializeObject(object oObj)
@@ -432,7 +476,14 @@ public static class Logger
         }
         catch
         {
-            return oObj.ToString();
+            try
+            {
+                return oObj.ToString();
+            }
+            catch
+            {
+                return "[SERIALIZE_FAILED]";
+            }
         }
     }
 }
