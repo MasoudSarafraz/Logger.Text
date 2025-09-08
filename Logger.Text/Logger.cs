@@ -9,26 +9,26 @@ using System.Runtime.CompilerServices;
 
 public static class Logger
 {
-    private static string _LogDirectory;
-    private static bool? _EnableLogging;
-    private static readonly object _InitLock = new object();
-    private const string mConfigFileName = "logger_config.xml";
-    private static readonly string _ConfigFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, mConfigFileName);
-    private static readonly string _LogBaseName = "application_log.txt";
-    private static readonly long _MaxLogSize = 3L * 1024 * 1024; // 3 MB
-    private static readonly int _MaxBackups = 10;
-    private static readonly ConcurrentQueue<string> _LogQueue = new ConcurrentQueue<string>();
-    private static readonly Thread _WriterThread;
-    private static volatile bool _ShouldStop = false;
-    private static readonly AutoResetEvent _WriteEvent = new AutoResetEvent(false);
-    private static readonly TimeSpan _WriteInterval = TimeSpan.FromMilliseconds(50);
+    private static string _LogDirectory; // مسیر دایرکتوری ذخیره لاگ — از فایل کانفیگ یا پیش‌فرض بارگذاری می‌شود
+    private static bool? _EnableLogging; // وضعیت فعال/غیرفعال بودن لاگ — null = هنوز خوانده نشده — از کانفیگ یا پیش‌فرض
+    private static readonly object _InitLock = new object(); // قفل برای همگام‌سازی مقداردهی اولیه و عملیات خواندن/نوشتن کانفیگ
+    private const string mConfigFileName = "logger_config.xml"; // نام فایل پیکربندی — ذخیره مسیر و وضعیت لاگ
+    private static readonly string _ConfigFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, mConfigFileName); // مسیر کامل فایل کانفیگ — کنار exe/dll
+    private static readonly string _LogBaseName = "application_log.txt"; // نام فایل لاگ اصلی — مقصد نوشتن لاگ‌ها
+    private static readonly long _MaxLogSize = 3L * 1024 * 1024; // حداکثر حجم فایل لاگ قبل از چرخش — 3 مگابایت
+    private static readonly int _MaxBackups = 10; // حداکثر تعداد فایل‌های بک‌آپ لاگ — قدیمی‌ترها پاک می‌شوند
+    private static readonly ConcurrentQueue<string> _LogQueue = new ConcurrentQueue<string>(); // صف Thread-Safe — نگهداری لاگ‌ها برای نوشتن در پس‌زمینه
+    private static readonly Thread _WriterThread; // نخ پس‌زمینه — مسئول نوشتن Batch لاگ‌ها در دیسک
+    private static volatile bool _ShouldStop = false; // پرچم volatile — اعلام توقف نخ پس‌زمینه در زمان Shutdown
+    private static readonly AutoResetEvent _WriteEvent = new AutoResetEvent(false); // رویداد همگام‌سازی — بیدار کردن نخ نویسنده هنگام افزودن لاگ یا timeout
+    private static readonly TimeSpan _WriteInterval = TimeSpan.FromMilliseconds(50); // فاصله زمانی بررسی صف در حالت Idle — 50 میلی‌ثانیه
 
     private static readonly Newtonsoft.Json.JsonSerializerSettings _JsonSettings = new Newtonsoft.Json.JsonSerializerSettings
     {
-        MaxDepth = 5,
-        NullValueHandling = Newtonsoft.Json.NullValueHandling.Include,
-        ReferenceLoopHandling = Newtonsoft.Json.ReferenceLoopHandling.Ignore,
-        Formatting = Newtonsoft.Json.Formatting.Indented
+        MaxDepth = 5,// حداکثر عمق سریالایز — جلوگیری از StackOverflow در اشیاء تو در تو
+        NullValueHandling = Newtonsoft.Json.NullValueHandling.Include, // نادیده گرفتن مقادیر null — کاهش حجم لاگ
+        ReferenceLoopHandling = Newtonsoft.Json.ReferenceLoopHandling.Ignore, // نادیده گرفتن حلقه‌های مرجع — جلوگیری از Exception
+        Formatting = Newtonsoft.Json.Formatting.Indented // بدون ایندنت — کاهش حجم و افزایش سرعت سریالایز
     };
 
     static Logger()
