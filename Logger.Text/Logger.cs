@@ -383,12 +383,18 @@ public static class Logger
                             if (mCurrentSize >= _MaxLogSize)
                                 CreateBackup();
                         }
-                        catch { }
+                        catch
+                        {
+
+                        }
                     }
 
                     File.AppendAllText(LogFilePath, mBatchText, Encoding.UTF8);
                 }
-                catch { }
+                catch
+                {
+
+                }
             }
         }
         catch { }
