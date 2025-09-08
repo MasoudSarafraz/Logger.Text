@@ -8,7 +8,6 @@ using System.Collections.Concurrent;
 
 public static class Logger
 {
-    // --- Config & Init ---
     private static string _LogDirectory;
     private static bool? _EnableLogging;
     private static readonly object _InitLock = new object();
@@ -17,24 +16,20 @@ public static class Logger
     private static readonly string _LogBaseName = "application_log.txt";
     private static readonly long _MaxLogSize = 3L * 1024 * 1024; // 3 MB
     private static readonly int _MaxBackups = 10;
-
-    // --- Performance Optimized Fields ---
     private static readonly ConcurrentQueue<string> _LogQueue = new ConcurrentQueue<string>();
     private static readonly Thread _WriterThread;
     private static volatile bool _ShouldStop = false;
     private static readonly AutoResetEvent _WriteEvent = new AutoResetEvent(false);
-    private static readonly TimeSpan _WriteInterval = TimeSpan.FromMilliseconds(50); // هر 50ms بنویس
-                                                                                     // --- Serialize Optimized (با کش کردن JsonSerializer) ---
+    private static readonly TimeSpan _WriteInterval = TimeSpan.FromMilliseconds(50);
     private static readonly Newtonsoft.Json.JsonSerializerSettings _JsonSettings = new Newtonsoft.Json.JsonSerializerSettings
     {
         MaxDepth = 5,
         NullValueHandling = Newtonsoft.Json.NullValueHandling.Include,
         //ReferenceLoopHandling = Newtonsoft.Json.ReferenceLoopHandling.Ignore,
-        Formatting = Newtonsoft.Json.Formatting.Indented // برای سرعت بیشتر — Indented نباشد
+        Formatting = Newtonsoft.Json.Formatting.Indented
     };
 
 
-    // --- Static Constructor (برای شروع نخ پس‌زمینه) ---
     static Logger()
     {
         _WriterThread = new Thread(BackgroundWriterLoop)
@@ -45,7 +40,6 @@ public static class Logger
         _WriterThread.Start();
     }
 
-    // --- Properties (با Double-Check Locking) ---
     private static string LogDirectory
     {
         get
@@ -83,7 +77,6 @@ public static class Logger
         get { return Path.Combine(LogDirectory, _LogBaseName); }
     }
 
-    // --- Initialize ---
     public static void Initialize(string mLogDirectory = null, bool? mEnableLogging = null)
     {
         lock (_InitLock)
@@ -95,7 +88,6 @@ public static class Logger
         }
     }
 
-    // --- Config Helpers ---
     private static void InitializeFromConfig()
     {
         if (_LogDirectory != null && _EnableLogging != null) return;
@@ -166,13 +158,12 @@ public static class Logger
         catch { }
     }
 
-    // --- Logging API (سریع — فقط Enqueue می‌کند) ---
     public static void LogRequest(object oRequest)
     {
         if (!EnableLogging) return;
         string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] START REQUEST: {SerializeObject(oRequest)}";
         _LogQueue.Enqueue(mLogMessage);
-        _WriteEvent.Set(); // به نخ پس‌زمینه بگو بیدار شه
+        _WriteEvent.Set();
     }
 
     public static void LogResponse(object oResponse)
@@ -191,19 +182,14 @@ public static class Logger
         _WriteEvent.Set();
     }
 
-    // --- Background Writer Thread ---
     private static void BackgroundWriterLoop()
     {
         while (!_ShouldStop)
         {
             try
             {
-                // منتظر بمان تا رویداد فعال شود یا timeout شود
                 _WriteEvent.WaitOne(_WriteInterval);
-
                 if (_LogQueue.IsEmpty) continue;
-
-                // Batch کردن: چند لاگ را با هم بگیر
                 var mBatch = new StringBuilder();
                 string mItem;
                 int mCount = 0;
@@ -215,21 +201,19 @@ public static class Logger
                 }
 
                 if (mBatch.Length == 0) continue;
-
-                // نوشتن با قفل فقط برای I/O و Rotate
                 WriteBatchToDisk(mBatch.ToString());
             }
-            catch { /* ignore */ }
-        }
+            catch
+            {
 
-        // قبل از خروج، باقی‌مانده را بنویس
+            }
+        }
         FlushRemainingLogs();
     }
 
     private static void WriteBatchToDisk(string mBatchText)
     {
-        // فقط برای دسترسی به فایل و Rotate — قفل می‌گیریم
-        lock (_InitLock) // از _InitLock استفاده می‌کنیم چون هم برای Config و هم برای I/O مناسب است
+        lock (_InitLock)
         {
             try
             {
@@ -277,7 +261,6 @@ public static class Logger
         catch { }
     }
 
-    // --- Flush Remaining Logs on Stop (اختیاری — برای تمیز خروج) ---
     private static void FlushRemainingLogs()
     {
         var mBatch = new StringBuilder();
@@ -292,14 +275,13 @@ public static class Logger
         }
     }
 
-    // --- Dispose Pattern (اختیاری — برای توقف نخ و فلاش کردن) ---
     public static void Shutdown()
     {
         _ShouldStop = true;
-        _WriteEvent.Set(); // آخرین بار بیدارش کن
-        if (!_WriterThread.Join(2000)) // 2 ثانیه صبر کن
+        _WriteEvent.Set();
+        if (!_WriterThread.Join(2000))
         {
-            _WriterThread.Abort(); // fallback (در .NET 4.0)
+            _WriterThread.Abort();
         }
     }
 
