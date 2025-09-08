@@ -27,7 +27,7 @@ public static class Logger
     private static bool _IncludeAssemblyInLog = false;
     private static readonly Newtonsoft.Json.JsonSerializerSettings _JsonSettings = new Newtonsoft.Json.JsonSerializerSettings
     {
-        MaxDepth = 5,// حداکثر عمق سریالایز — جلوگیری از StackOverflow در اشیاء تو در تو
+        MaxDepth = 5,// حداکثر عمق سریالایز — جلوگیری از Overflow در اشیاء تو در تو
         NullValueHandling = Newtonsoft.Json.NullValueHandling.Include, // نادیده گرفتن مقادیر null — کاهش حجم لاگ
         ReferenceLoopHandling = Newtonsoft.Json.ReferenceLoopHandling.Ignore, // نادیده گرفتن حلقه‌های مرجع — جلوگیری از Exception
         Formatting = Newtonsoft.Json.Formatting.Indented // بدون ایندنت — کاهش حجم و افزایش سرعت سریالایز
