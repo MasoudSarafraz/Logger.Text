@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Xml;
@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Collections.Generic;
 
 public static class Logger
 {
@@ -18,7 +19,7 @@ public static class Logger
     private static readonly long _MaxLogSize = 5L * 1024 * 1024; // حداکثر حجم فایل لاگ قبل از چرخش — 5 مگابایت
     private static readonly int _MaxBackups = 10; // حداکثر تعداد فایل‌های بک‌آپ لاگ — قدیمی‌ترها پاک می‌شوند
     private static readonly ConcurrentQueue<string> _LogQueue = new ConcurrentQueue<string>(); // صف Thread-Safe — نگهداری لاگ‌ها برای نوشتن در پس‌زمینه
-    private static readonly Thread _WriterThread; // نخ پس‌زمینه — مسئول نوشتن Batch لاگ‌ها در دیسک
+    private static Thread _WriterThread; // نخ پس‌زمینه — مسئول نوشتن Batch لاگ‌ها در دیسک
     private static volatile bool _ShouldStop = false; // پرچم volatile — اعلام توقف نخ پس‌زمینه در زمان Shutdown
     private static readonly AutoResetEvent _WriteEvent = new AutoResetEvent(false); // رویداد همگام‌سازی — بیدار کردن نخ نویسنده هنگام افزودن لاگ یا timeout
     // فاصله زمانی بررسی صف در حالت Idle — 50 میلی‌ثانیه
@@ -32,7 +33,33 @@ public static class Logger
         ReferenceLoopHandling = Newtonsoft.Json.ReferenceLoopHandling.Ignore, // نادیده گرفتن حلقه‌های مرجع — جلوگیری از Exception
         Formatting = Newtonsoft.Json.Formatting.Indented // بدون ایندنت — کاهش حجم و افزایش سرعت سریالایز
     };
+
+    // فیلدهای جدید برای تحمل خطا و self-repair
+    private static volatile bool _LoggerOperational = true; // وضعیت عملیاتی لاگر
+    private static volatile int _RestartCount = 0; // شمارنده تعداد تلاش‌های بازیابی
+    private static readonly int _MaxRestartAttempts = 5; // حداکثر تلاش برای بازیابی
+    private static readonly TimeSpan _RestartDelay = TimeSpan.FromSeconds(5); // تأخیر بین تلاش‌های بازیابی
+    private static volatile bool _IsShuttingDown = false; // وضعیت خاموش شدن
+
+    // فیلدهای جدید برای مدیریت بار بالا
+    private static readonly int _MaxQueueSize = 50000; // حداکثر اندازه صف برای جلوگیری از مصرف حافظه زیاد
+    private static volatile int _CurrentQueueSize = 0; // اندازه فعلی صف (برای بررسی سریع)
+    private static volatile int _DroppedLogsCount = 0; // تعداد لاگ‌های حذف شده در اثر پر شدن صف
+    private static readonly TimeSpan _HighLoadWriteInterval = TimeSpan.FromMilliseconds(10); // فاصله زمانی در بار بالا
+    private static readonly int _HighLoadBatchSize = 20; // اندازه دسته در بار بالا
+    private static readonly int _NormalBatchSize = 100; // اندازه دسته در حالت عادی
+    private static volatile bool _HighLoadMode = false; // حالت بار بالا
+    private static volatile int _ConsecutiveWriteErrors = 0; // شمارنده خطاهای متوالی نوشتن
+    private static readonly int _MaxConsecutiveWriteErrors = 10; // حداکثر خطاهای متوالی مجاز
+    private static readonly object _QueueSizeLock = new object(); // قفل برای به‌روزرسانی اندازه صف
+    private static readonly Queue<string> _OverflowBuffer = new Queue<string>(); // بافر برای لاگ‌های حذف شده
+
     static Logger()
+    {
+        InitializeLogger();
+    }
+
+    private static void InitializeLogger()
     {
         try
         {
@@ -43,22 +70,37 @@ public static class Logger
             };
             _WriterThread.Start();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _LoggerOperational = false;
+            Console.WriteLine($"Logger initialization failed: {ex.Message}");
+            // برنامه ادامه پیدا می‌کند حتی اگر لاگر کار نکند
+        }
     }
 
     private static string LogDirectory
     {
         get
         {
-            if (_LogDirectory == null)
+            if (!_LoggerOperational) return string.Empty;
+
+            try
             {
-                lock (_InitLock)
+                if (_LogDirectory == null)
                 {
-                    if (_LogDirectory == null)
-                        InitializeFromConfig();
+                    lock (_InitLock)
+                    {
+                        if (_LogDirectory == null)
+                            InitializeFromConfig();
+                    }
                 }
+                return _LogDirectory ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
             }
-            return _LogDirectory ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
+            catch
+            {
+                _LoggerOperational = false;
+                return string.Empty;
+            }
         }
     }
 
@@ -66,15 +108,25 @@ public static class Logger
     {
         get
         {
-            if (_EnableLogging == null)
+            if (!_LoggerOperational) return false;
+
+            try
             {
-                lock (_InitLock)
+                if (_EnableLogging == null)
                 {
-                    if (_EnableLogging == null)
-                        InitializeFromConfig();
+                    lock (_InitLock)
+                    {
+                        if (_EnableLogging == null)
+                            InitializeFromConfig();
+                    }
                 }
+                return _EnableLogging.GetValueOrDefault(true);
             }
-            return _EnableLogging.GetValueOrDefault(true);
+            catch
+            {
+                _LoggerOperational = false;
+                return false;
+            }
         }
     }
 
@@ -82,6 +134,8 @@ public static class Logger
 
     public static void Initialize(string mLogDirectory = null, bool? mEnableLogging = null, bool? mIncludeAssemblyInLog = null)
     {
+        if (!_LoggerOperational) return;
+
         try
         {
             lock (_InitLock)
@@ -94,7 +148,10 @@ public static class Logger
                     SaveToConfigFile();
             }
         }
-        catch { }
+        catch
+        {
+            _LoggerOperational = false;
+        }
     }
 
     private static void InitializeFromConfig()
@@ -199,11 +256,10 @@ public static class Logger
     {
         try
         {
-            if (!EnableLogging) return;
+            if (!EnableLogging || !_LoggerOperational) return;
             string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
             string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] INFO: {mMessage}{mCallerInfo}";
-            _LogQueue.Enqueue(mLogMessage);
-            _WriteEvent.Set();
+            EnqueueLog(mLogMessage);
         }
         catch { }
     }
@@ -212,11 +268,10 @@ public static class Logger
     {
         try
         {
-            if (!EnableLogging) return;
+            if (!EnableLogging || !_LoggerOperational) return;
             string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
             string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] INFO: {SerializeObject(oData)}{mCallerInfo}";
-            _LogQueue.Enqueue(mLogMessage);
-            _WriteEvent.Set();
+            EnqueueLog(mLogMessage);
         }
         catch { }
     }
@@ -225,11 +280,10 @@ public static class Logger
     {
         try
         {
-            if (!EnableLogging) return;
+            if (!EnableLogging || !_LoggerOperational) return;
             string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
             string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] START: {SerializeObject(oData)}{mCallerInfo}";
-            _LogQueue.Enqueue(mLogMessage);
-            _WriteEvent.Set();
+            EnqueueLog(mLogMessage);
         }
         catch { }
     }
@@ -238,11 +292,10 @@ public static class Logger
     {
         try
         {
-            if (!EnableLogging) return;
+            if (!EnableLogging || !_LoggerOperational) return;
             string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
             string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] END: {SerializeObject(oData)}{mCallerInfo}";
-            _LogQueue.Enqueue(mLogMessage);
-            _WriteEvent.Set();
+            EnqueueLog(mLogMessage);
         }
         catch { }
     }
@@ -251,11 +304,10 @@ public static class Logger
     {
         try
         {
-            if (!EnableLogging) return;
+            if (!EnableLogging || !_LoggerOperational) return;
             string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
             string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] START REQUEST: {SerializeObject(oRequest)}{mCallerInfo}";
-            _LogQueue.Enqueue(mLogMessage);
-            _WriteEvent.Set();
+            EnqueueLog(mLogMessage);
         }
         catch { }
     }
@@ -264,11 +316,10 @@ public static class Logger
     {
         try
         {
-            if (!EnableLogging) return;
+            if (!EnableLogging || !_LoggerOperational) return;
             string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
             string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] RESPONSE: {SerializeObject(oResponse)}{mCallerInfo}";
-            _LogQueue.Enqueue(mLogMessage);
-            _WriteEvent.Set();
+            EnqueueLog(mLogMessage);
         }
         catch { }
     }
@@ -277,29 +328,81 @@ public static class Logger
     {
         try
         {
-            if (!EnableLogging || oException == null) return;
+            if (!EnableLogging || !_LoggerOperational || oException == null) return;
             string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
             string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] ERROR: {SerializeObject(oException)}{mCallerInfo}";
-            _LogQueue.Enqueue(mLogMessage);
-            _WriteEvent.Set();
+            EnqueueLog(mLogMessage);
         }
-        catch
-        {
-        }
+        catch { }
     }
 
     public static void LogError(string mMessage, [CallerMemberName] string mMemberName = "", [CallerFilePath] string mFilePath = "", [CallerLineNumber] int mLineNumber = 0)
     {
         try
         {
-            if (!EnableLogging) return;
+            if (!EnableLogging || !_LoggerOperational) return;
             string mCallerInfo = BuildCallerInfo(mMemberName, mFilePath, mLineNumber);
             string mLogMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] ERROR: {mMessage}{mCallerInfo}";
-            _LogQueue.Enqueue(mLogMessage);
+            EnqueueLog(mLogMessage);
+        }
+        catch { }
+    }
+
+    private static void EnqueueLog(string mLogMessage)
+    {
+        try
+        {
+            if (!_LoggerOperational) return;
+
+            // بررسی وضعیت نخ نویسنده و بازیابی در صورت نیاز
+            if (_WriterThread == null || !_WriterThread.IsAlive)
+            {
+                TryRestartLogger();
+                if (!_LoggerOperational) return;
+            }
+
+            // بررسی اندازه صف و مدیریت بار بالا
+            lock (_QueueSizeLock)
+            {
+                if (_CurrentQueueSize >= _MaxQueueSize)
+                {
+                    // در حالت بار بالا، لاگ‌های قدیمی‌تر را حذف می‌کنیم
+                    if (_LogQueue.TryDequeue(out string _))
+                    {
+                        _CurrentQueueSize--;
+                        _DroppedLogsCount++;
+
+                        // ذخیره لاگ‌های حذف شده در بافر برای گزارش‌دهی بعدی
+                        lock (_OverflowBuffer)
+                        {
+                            _OverflowBuffer.Enqueue(mLogMessage);
+                            if (_OverflowBuffer.Count > 100)
+                                _OverflowBuffer.Dequeue();
+                        }
+                    }
+
+                    // فعال کردن حالت بار بالا
+                    _HighLoadMode = true;
+                }
+                else
+                {
+                    _LogQueue.Enqueue(mLogMessage);
+                    _CurrentQueueSize++;
+
+                    // اگر صف از حد مشخصی پر شده، حالت بار بالا را فعال کن
+                    if (_CurrentQueueSize > _MaxQueueSize * 0.7)
+                        _HighLoadMode = true;
+                    else if (_CurrentQueueSize < _MaxQueueSize * 0.3)
+                        _HighLoadMode = false;
+                }
+            }
+
+            // بیدار کردن نخ نویسنده
             _WriteEvent.Set();
         }
         catch
         {
+            _LoggerOperational = false;
         }
     }
 
@@ -334,34 +437,75 @@ public static class Logger
 
     private static void BackgroundWriterLoop()
     {
-        while (!_ShouldStop)
+        while (!_IsShuttingDown)
         {
             try
             {
-                _WriteEvent.WaitOne(_WriteInterval);
+                // انتخاب فاصله زمانی بر اساس بار سیستم
+                TimeSpan currentInterval = _HighLoadMode ? _HighLoadWriteInterval : _WriteInterval;
+                _WriteEvent.WaitOne(currentInterval);
+
                 if (_LogQueue.IsEmpty) continue;
 
+                int batchSize = _HighLoadMode ? _HighLoadBatchSize : _NormalBatchSize;
                 var mBatch = new StringBuilder();
                 string mItem;
                 int mCount = 0;
+                int processedCount = 0;
 
-                while (_LogQueue.TryDequeue(out mItem) && mCount < 100)
+                while (_LogQueue.TryDequeue(out mItem) && mCount < batchSize)
                 {
-                    if (mItem != null) mBatch.AppendLine(mItem);
+                    if (mItem != null)
+                    {
+                        mBatch.AppendLine(mItem);
+                        processedCount++;
+                    }
                     mCount++;
                 }
 
                 if (mBatch.Length == 0) continue;
+
+                // به‌روزرسانی اندازه صف
+                lock (_QueueSizeLock)
+                {
+                    _CurrentQueueSize -= processedCount;
+                    if (_CurrentQueueSize < 0) _CurrentQueueSize = 0;
+                }
+
                 WriteBatchToDisk(mBatch.ToString());
+
+                // اگر با موفقیت نوشت، شمارنده خطا را صفر کن
+                _ConsecutiveWriteErrors = 0;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // ثبت خطای داخلی لاگر
+                Console.WriteLine($"Logger internal error: {ex.Message}");
+
+                // افزایش شمارنده خطاهای متوالی
+                _ConsecutiveWriteErrors++;
+
+                // اگر خطاهای متوالی بیش از حد مجاز بود، لاگر را غیرفعال کن
+                if (_ConsecutiveWriteErrors >= _MaxConsecutiveWriteErrors)
+                {
+                    Console.WriteLine($"Maximum consecutive write errors ({_MaxConsecutiveWriteErrors}) reached. Disabling logger.");
+                    _LoggerOperational = false;
+                    return;
+                }
+
+                // تلاش برای بازیابی خودکار
+                TryRestartLogger();
+
+                // تأخیر برای جلوگیری از مصرف CPU در صورت خطای مداوم
+                Thread.Sleep(1000);
+            }
         }
         FlushRemainingLogs();
     }
 
     private static void WriteBatchToDisk(string mBatchText)
     {
-        if (string.IsNullOrEmpty(mBatchText)) return;
+        if (string.IsNullOrEmpty(mBatchText) || !_LoggerOperational) return;
 
         try
         {
@@ -383,21 +527,18 @@ public static class Logger
                             if (mCurrentSize >= _MaxLogSize)
                                 CreateBackup();
                         }
-                        catch
-                        {
-
-                        }
+                        catch { }
                     }
 
                     File.AppendAllText(LogFilePath, mBatchText, Encoding.UTF8);
                 }
-                catch
-                {
-
-                }
+                catch { }
             }
         }
-        catch { }
+        catch
+        {
+            throw; // اجازه می‌دهیم خطا به سطح بالاتر برود تا مدیریت شود
+        }
     }
 
     private static void CreateBackup()
@@ -443,13 +584,34 @@ public static class Logger
         {
             var mBatch = new StringBuilder();
             string mItem;
+            int processedCount = 0;
+
             while (_LogQueue.TryDequeue(out mItem))
             {
-                if (mItem != null) mBatch.AppendLine(mItem);
+                if (mItem != null)
+                {
+                    mBatch.AppendLine(mItem);
+                    processedCount++;
+                }
             }
+
+            // به‌روزرسانی اندازه صف
+            lock (_QueueSizeLock)
+            {
+                _CurrentQueueSize -= processedCount;
+                if (_CurrentQueueSize < 0) _CurrentQueueSize = 0;
+            }
+
             if (mBatch.Length > 0)
             {
                 WriteBatchToDisk(mBatch.ToString());
+            }
+
+            // گزارش وضعیت نهایی
+            if (_DroppedLogsCount > 0)
+            {
+                string summary = $"[Logger Shutdown Summary] Dropped logs: {_DroppedLogsCount}, Final queue size: {_CurrentQueueSize}";
+                File.AppendAllText(LogFilePath, summary + Environment.NewLine, Encoding.UTF8);
             }
         }
         catch { }
@@ -457,16 +619,71 @@ public static class Logger
 
     public static void Shutdown()
     {
+        if (_IsShuttingDown) return;
+
+        _IsShuttingDown = true;
         try
         {
-            _ShouldStop = true;
             _WriteEvent.Set();
-            if (!_WriterThread.Join(2000))
+            if (_WriterThread != null && !_WriterThread.Join(5000))
             {
-                try { _WriterThread.Abort(); } catch { }
+                Console.WriteLine("Logger writer thread did not shut down gracefully");
             }
         }
         catch { }
+    }
+
+    private static void TryRestartLogger()
+    {
+        if (_IsShuttingDown || _RestartCount >= _MaxRestartAttempts) return;
+
+        lock (_InitLock)
+        {
+            if (_IsShuttingDown || _RestartCount >= _MaxRestartAttempts) return;
+
+            _RestartCount++;
+            _LoggerOperational = false;
+
+            try
+            {
+                Console.WriteLine($"Attempting to restart logger (attempt {_RestartCount}/{_MaxRestartAttempts})");
+
+                // توقف نخ قبلی
+                if (_WriterThread != null && _WriterThread.IsAlive)
+                {
+                    _ShouldStop = true;
+                    _WriteEvent.Set();
+                    _WriterThread.Join(1000);
+                }
+
+                // تأخیر قبل از راه‌اندازی مجدد
+                Thread.Sleep(_RestartDelay);
+
+                // راه‌اندازی مجدد
+                _ShouldStop = false;
+                _WriterThread = new Thread(BackgroundWriterLoop)
+                {
+                    IsBackground = true,
+                    Name = "Logger-Background-Writer-Restarted"
+                };
+                _WriterThread.Start();
+
+                _LoggerOperational = true;
+                _ConsecutiveWriteErrors = 0; // بازنشانی شمارنده خطاها
+                Console.WriteLine("Logger successfully restarted");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Logger restart failed: {ex.Message}");
+                _LoggerOperational = false;
+
+                // اگر به حداکثر تلاش رسیده باشیم، لاگر را غیرفعال می‌کنیم
+                if (_RestartCount >= _MaxRestartAttempts)
+                {
+                    Console.WriteLine("Maximum restart attempts reached. Logger disabled.");
+                }
+            }
+        }
     }
 
     private static string SerializeObject(object oObj)
