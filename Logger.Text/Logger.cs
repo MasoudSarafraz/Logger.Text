@@ -705,4 +705,132 @@ public static class Logger
             }
         }
     }
+    /// <summary>
+    /// شبیه‌سازی شرایط چند نخی با بار بسیار بالا برای تست عملکرد Logger
+    /// </summary>
+    /// <param name="threadCount">تعداد نخ‌های همزمان</param>
+    /// <param name="logsPerThread">تعداد لاگ‌های ارسالی توسط هر نخ</param>
+    /// <param name="delayBetweenLogs">تأخیر بین ارسال لاگ‌ها (میلی‌ثانیه)</param>
+    [System.Diagnostics.Conditional("DEBUG")]
+    public static void SimulateHighLoad(int threadCount = 50, int logsPerThread = 1000, int delayBetweenLogs = 0)
+    {
+        Console.WriteLine($"[Load Test] Starting simulation with {threadCount} threads, {logsPerThread} logs per thread");
+
+        var startSignal = new ManualResetEventSlim(false);
+        var threads = new List<Thread>();
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var totalLogs = threadCount * logsPerThread;
+
+        // ایجاد نخ‌ها
+        for (int i = 0; i < threadCount; i++)
+        {
+            int threadId = i;
+            var thread = new Thread(() =>
+            {
+                // انتظار برای سیگنال شروع همزمان
+                startSignal.Wait();
+
+                try
+                {
+                    for (int j = 0; j < logsPerThread; j++)
+                    {
+                        // شبیه‌سازی بار کاری
+                        if (delayBetweenLogs > 0)
+                            Thread.Sleep(delayBetweenLogs);
+
+                        // ارسال انواع مختلف لاگ
+                        switch (j % 6)
+                        {
+                            case 0:
+                                Logger.LogInfo($"Thread-{threadId} Info message #{j}");
+                                break;
+                            case 1:
+                                Logger.LogStart($"Thread-{threadId} Start operation #{j}");
+                                break;
+                            case 2:
+                                Logger.LogEnd($"Thread-{threadId} End operation #{j}");
+                                break;
+                            case 3:
+                                Logger.LogRequest($"Thread-{threadId} Request data #{j}");
+                                break;
+                            case 4:
+                                Logger.LogResponse($"Thread-{threadId} Response data #{j}");
+                                break;
+                            case 5:
+                                Logger.LogError($"Thread-{threadId} Error simulation #{j}");
+                                break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Load Test] Thread-{threadId} failed: {ex.Message}");
+                }
+            });
+
+            threads.Add(thread);
+            thread.Start();
+        }
+
+        // شروع همزمان تمام نخ‌ها
+        startSignal.Set();
+
+        // انتظار برای اتمام تمام نخ‌ها
+        foreach (var thread in threads)
+        {
+            thread.Join();
+        }
+
+        stopwatch.Stop();
+
+        // گزارش نتایج
+        var duration = stopwatch.Elapsed;
+        var logsPerSecond = totalLogs / duration.TotalSeconds;
+
+        // دریافت آمار با استفاده از Reflection
+        int droppedLogs = 0;
+        int currentQueueSize = 0;
+        bool highLoadMode = false;
+
+        try
+        {
+            droppedLogs = (int)typeof(Logger)
+                .GetField("_DroppedLogsCount", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+                .GetValue(null);
+
+            currentQueueSize = (int)typeof(Logger)
+                .GetField("_CurrentQueueSize", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+                .GetValue(null);
+
+            highLoadMode = (bool)typeof(Logger)
+                .GetField("_HighLoadMode", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+                .GetValue(null);
+        }
+        catch { }
+
+        Console.WriteLine("\n[Load Test Results]");
+        Console.WriteLine($"Total logs sent: {totalLogs:N0}");
+        Console.WriteLine($"Dropped logs: {droppedLogs:N0} ({(droppedLogs * 100.0 / totalLogs):F2}%)");
+        Console.WriteLine($"Current queue size: {currentQueueSize:N0}");
+        Console.WriteLine($"High load mode: {highLoadMode}");
+        Console.WriteLine($"Duration: {duration.TotalSeconds:F2} seconds");
+        Console.WriteLine($"Logs per second: {logsPerSecond:N0}");
+        Console.WriteLine($"Average time per log: {(duration.TotalMilliseconds / totalLogs):F2} ms");
+
+        // توصیه‌ها بر اساس نتایج
+        if (droppedLogs > 0)
+        {
+            Console.WriteLine("\n[Recommendation] Some logs were dropped. Consider:");
+            Console.WriteLine("- Increasing _MaxQueueSize");
+            Console.WriteLine("- Optimizing log processing speed");
+            Console.WriteLine("- Reducing log volume in production");
+        }
+
+        if (duration.TotalSeconds > 30)
+        {
+            Console.WriteLine("\n[Recommendation] Test took too long. Consider:");
+            Console.WriteLine("- Reducing logsPerThread for shorter tests");
+            Console.WriteLine("- Increasing thread count for faster completion");
+        }
+    }
 }
