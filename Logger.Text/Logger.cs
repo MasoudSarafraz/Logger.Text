@@ -76,7 +76,6 @@ public static class Logger
         get
         {
             if (!_LoggerOperational) return string.Empty;
-
             try
             {
                 if (_LogDirectory == null)
@@ -103,7 +102,6 @@ public static class Logger
         get
         {
             if (!_LoggerOperational) return false;
-
             try
             {
                 if (_EnableLogging == null)
@@ -130,7 +128,6 @@ public static class Logger
     public static void Initialize(string mLogDirectory = null, bool? mEnableLogging = null, bool? mIncludeAssemblyInLog = null)
     {
         if (!_LoggerOperational) return;
-
         try
         {
             lock (_InitLock)
@@ -138,7 +135,6 @@ public static class Logger
                 if (mLogDirectory != null) _LogDirectory = mLogDirectory;
                 if (mEnableLogging != null) _EnableLogging = mEnableLogging;
                 if (mIncludeAssemblyInLog != null) _IncludeAssemblyInLog = mIncludeAssemblyInLog.Value;
-
                 if (_LogDirectory != null && _EnableLogging != null)
                     SaveToConfigFile();
             }
@@ -155,7 +151,6 @@ public static class Logger
         try
         {
             if (_LogDirectory != null && _EnableLogging != null) return;
-
             if (File.Exists(_ConfigFilePath))
             {
                 LoadFromConfigFile();
@@ -185,11 +180,9 @@ public static class Logger
             oDoc.Load(_ConfigFilePath);
             XmlNode oRoot = oDoc.DocumentElement;
             if (oRoot == null) throw new Exception("Invalid config");
-
             XmlNode oDirNode = oRoot.SelectSingleNode("LogDirectory");
             XmlNode oEnableNode = oRoot.SelectSingleNode("EnableLogging");
             XmlNode oIncludeAssemblyNode = oRoot.SelectSingleNode("IncludeAssemblyInLog");
-
             string mRawPath = oDirNode?.InnerText?.Trim();
             if (!string.IsNullOrEmpty(mRawPath) && mRawPath.StartsWith("~"))
             {
@@ -201,13 +194,10 @@ public static class Logger
             {
                 _LogDirectory = mRawPath;
             }
-
             if (oEnableNode != null && bool.TryParse(oEnableNode.InnerText, out bool mEnabled))
                 _EnableLogging = mEnabled;
-
             if (oIncludeAssemblyNode != null && bool.TryParse(oIncludeAssemblyNode.InnerText, out bool mInclude))
                 _IncludeAssemblyInLog = mInclude;
-
             _LogDirectory = _LogDirectory ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
             _EnableLogging = _EnableLogging ?? true;
         }
@@ -246,7 +236,6 @@ public static class Logger
             oRoot.AppendChild(oIncludeAssemblyElem);
             string mTempFile = _ConfigFilePath + ".tmp";
             oDoc.Save(mTempFile);
-
             if (File.Exists(_ConfigFilePath))
                 File.Replace(mTempFile, _ConfigFilePath, _ConfigFilePath + ".backup");
             else
@@ -363,13 +352,11 @@ public static class Logger
                 EmergencyWriteToDisk(mLogMessage);
                 return;
             }
-
             // Non-blocking enqueue with timeout
             if (!_LogQueue.TryAdd(mLogMessage, 50))
             {
                 Interlocked.Increment(ref _DroppedLogsCount);
                 EmergencyWriteToDisk(mLogMessage);
-
                 // Periodic warning about dropped messages
                 var mNow = DateTime.UtcNow;
                 if (mNow - _LastDropWarningTime > _DropWarningInterval)
@@ -378,7 +365,6 @@ public static class Logger
                     int mDropped = _DroppedLogsCount; // خواندن مستقیم از volatile field
                     SafeFallbackLog($"Queue overload! Dropped {mDropped} messages. Consider optimizing log frequency.");
                 }
-
                 // Enable high load mode
                 _HighLoadMode = true;
             }
@@ -395,7 +381,6 @@ public static class Logger
         {
             string mEmergencyPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "emergency_log.txt");
             string mFullMessage = $"[EMERGENCY] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff} {mLogMessage}{Environment.NewLine}";
-
             lock (typeof(Logger))
             {
                 File.AppendAllText(mEmergencyPath, mFullMessage, Encoding.UTF8);
@@ -410,7 +395,6 @@ public static class Logger
         {
             string mFallbackPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logger_errors.txt");
             string mFullMessage = $"[LOGGER_ERROR] {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss.fff} {mMessage}{Environment.NewLine}";
-
             File.AppendAllText(mFallbackPath, mFullMessage, Encoding.UTF8);
         }
         catch { /* If this fails, give up */ }
@@ -422,7 +406,6 @@ public static class Logger
         {
             string mClassName = Path.GetFileNameWithoutExtension(mFilePath ?? "");
             string mAssemblyPrefix = "";
-
             if (_IncludeAssemblyInLog)
             {
                 try
@@ -438,7 +421,6 @@ public static class Logger
                     mAssemblyPrefix = "Unknown:";
                 }
             }
-
             return $" [{mAssemblyPrefix} -> {mClassName} -> {mMemberName} Line{mLineNumber}]";
         }
         catch
@@ -452,29 +434,22 @@ public static class Logger
         var mBatch = new StringBuilder(8192);
         var mLastWriteTime = DateTime.UtcNow;
         var mItemsBuffer = new string[100];
-
         while (!_ShouldStop || !_LogQueue.IsCompleted)
         {
             try
             {
-                // Batch processing with timeout
-                int mItemsCount = _LogQueue.TryTakeMultiple(mItemsBuffer, 0, mItemsBuffer.Length,
-                    _HighLoadMode ? (int)_HighLoadWriteInterval.TotalMilliseconds : (int)_WriteInterval.TotalMilliseconds);
-
+                int mItemsCount = _LogQueue.TryTakeMultiple(mItemsBuffer, 0, mItemsBuffer.Length,_HighLoadMode ? (int)_HighLoadWriteInterval.TotalMilliseconds : (int)_WriteInterval.TotalMilliseconds);
                 if (mItemsCount > 0)
                 {
-                    for (int i = 0; i < mItemsCount; i++)
+                    for (int j = 0; j < mItemsCount; j++)
                     {
-                        mBatch.AppendLine(mItemsBuffer[i]);
-                        mItemsBuffer[i] = null; // Help GC
+                        mBatch.AppendLine(mItemsBuffer[j]);
+                        mItemsBuffer[j] = null; // Help GC
                     }
                 }
-
                 bool mShouldFlush = _ShouldStop && _LogQueue.IsCompleted;
-                bool mTimeoutReached = (DateTime.UtcNow - mLastWriteTime) >=
-                    (_HighLoadMode ? _HighLoadWriteInterval : _WriteInterval) && mBatch.Length > 0;
+                bool mTimeoutReached = (DateTime.UtcNow - mLastWriteTime) >=(_HighLoadMode ? _HighLoadWriteInterval : _WriteInterval) && mBatch.Length > 0;
                 bool mBatchFull = mBatch.Length > 8192;
-
                 if (mShouldFlush || mTimeoutReached || mBatchFull)
                 {
                     if (mBatch.Length > 0)
@@ -482,14 +457,12 @@ public static class Logger
                         if (WriteBatchToDisk(mBatch.ToString()))
                         {
                             _ConsecutiveWriteErrors = 0;
-                            _HighLoadMode = false; // Disable high load mode on success
+                            _HighLoadMode = false; 
                         }
                         mBatch.Clear();
                     }
                     mLastWriteTime = DateTime.UtcNow;
                 }
-
-                // Memory management
                 if (mBatch.Capacity > 65536)
                 {
                     mBatch = new StringBuilder(8192);
@@ -510,7 +483,6 @@ public static class Logger
                 Thread.Sleep(Math.Min(100 * _ConsecutiveWriteErrors, 1000));
             }
         }
-
         // Final flush
         try
         {
@@ -536,7 +508,6 @@ public static class Logger
             lock (_InitLock)
             {
                 Directory.CreateDirectory(LogDirectory);
-
                 if (File.Exists(LogFilePath))
                 {
                     var mFileInfo = new FileInfo(LogFilePath);
@@ -545,8 +516,6 @@ public static class Logger
                         CreateBackup();
                     }
                 }
-
-                // High-performance writing with FileStream
                 using (var mStream = new FileStream(LogFilePath, FileMode.Append, FileAccess.Write, FileShare.Read, 8192, FileOptions.SequentialScan))
                 using (var mWriter = new StreamWriter(mStream, Encoding.UTF8))
                 {
@@ -576,10 +545,8 @@ public static class Logger
                 mBackupName = $"backup_application_log_{mTimestamp}_{Guid.NewGuid():N}.txt";
                 mBackupPath = Path.Combine(LogDirectory, mBackupName);
             }
-
+            //
             File.Move(LogFilePath, mBackupPath);
-
-            // Cleanup old backups
             try
             {
                 var oOldBackups = new DirectoryInfo(LogDirectory)
@@ -609,15 +576,11 @@ public static class Logger
         {
             _ShouldStop = true;
             _LogQueue.CompleteAdding();
-
-            // Adaptive shutdown timeout based on queue size
             int mWaitTime = Math.Min(30000, Math.Max(5000, _LogQueue.Count * 10));
             if (!_ShutdownCompleteEvent.Wait(TimeSpan.FromMilliseconds(mWaitTime)))
             {
                 SafeFallbackLog($"Graceful shutdown timeout after {mWaitTime}ms, {_LogQueue.Count} items remaining");
             }
-
-            // Final status report
             if (_DroppedLogsCount > 0)
             {
                 string summary = $"[SHUTDOWN] Dropped logs: {_DroppedLogsCount}, Restart attempts: {_RestartCount}";
@@ -644,8 +607,6 @@ public static class Logger
             try
             {
                 SafeFallbackLog($"Attempting logger restart ({_RestartCount}/{_MaxRestartAttempts})");
-
-                // Cleanup
                 if (_WriterTask != null)
                 {
                     _ShouldStop = true;
@@ -654,8 +615,6 @@ public static class Logger
                 }
 
                 Thread.Sleep(_RestartDelay);
-
-                // Restart
                 _ShouldStop = false;
                 _ConsecutiveWriteErrors = 0;
                 StartWriterTask();
@@ -712,26 +671,23 @@ public static class Logger
 }
 public static class BlockingCollectionExtensions
 {
-    public static int TryTakeMultiple<T>(this BlockingCollection<T> collection, T[] array, int startIndex, int count, int millisecondsTimeout)
+    public static int TryTakeMultiple<T>(this BlockingCollection<T> oCollection, T[] oArray, int iStartIndex, int iCount, int iMillisecondsTimeout)
     {
-        if (collection == null) throw new ArgumentNullException(nameof(collection));
-        if (array == null) throw new ArgumentNullException(nameof(array));
-
+        if (oCollection == null) throw new ArgumentNullException(nameof(oCollection));
+        if (oArray == null) throw new ArgumentNullException(nameof(oArray));
         int mItemsTaken = 0;
         var mStopwatch = System.Diagnostics.Stopwatch.StartNew();
-        int mRemainingTimeout = millisecondsTimeout;
-
-        for (int i = 0; i < count; i++)
+        int mRemainingTimeout = iMillisecondsTimeout;
+        for (int j = 0; j < iCount; j++)
         {
             T item;
-            if (collection.TryTake(out item, mRemainingTimeout))
+            if (oCollection.TryTake(out item, mRemainingTimeout))
             {
-                array[startIndex + i] = item;
+                oArray[iStartIndex + j] = item;
                 mItemsTaken++;
-
-                if (millisecondsTimeout != Timeout.Infinite)
+                if (iMillisecondsTimeout != Timeout.Infinite)
                 {
-                    mRemainingTimeout = millisecondsTimeout - (int)mStopwatch.ElapsedMilliseconds;
+                    mRemainingTimeout = iMillisecondsTimeout - (int)mStopwatch.ElapsedMilliseconds;
                     if (mRemainingTimeout <= 0) break;
                 }
             }
@@ -740,7 +696,6 @@ public static class BlockingCollectionExtensions
                 break;
             }
         }
-
         return mItemsTaken;
     }
 }
