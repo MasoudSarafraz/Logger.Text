@@ -6,392 +6,369 @@ using System.Threading.Tasks;
 using System.Linq;
 using System.IO;
 
-public static class LoggerStressTester
+
+public static class LoggerTest
 {
-    public static void RunExtremeStressTest()
+    /// <summary>
+    /// شبیه‌سازی محیط چندنخی با بار بسیار زیاد برای تست عملکرد لاگر
+    /// </summary>
+    /// <param name="threadCount">تعداد نخ‌ها (پیش‌فرض: 20)</param>
+    /// <param name="messagesPerThread">تعداد پیام‌ها در هر نخ (پیش‌فرض: 5000)</param>
+    /// <param name="testDurationMs">مدت زمان تست به میلی‌ثانیه (پیش‌فرض: 30000)</param>
+    /// <param name="useComplexObjects">استفاده از آبجکت‌های پیچیده برای لاگ (پیش‌فرض: true)</param>
+    /// <param name="tempLogDir">مسیر موقت برای لاگ‌ها (اختیاری)</param>
+    public static void SimulateHighLoad(
+        int threadCount = 20,
+        int messagesPerThread = 5000,
+        int testDurationMs = 30000,
+        bool useComplexObjects = true,
+        string tempLogDir = null)
     {
-        Console.WriteLine("=== EXTREME Logger Stress Test Started ===");
-        Console.WriteLine($"Start Time: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
+        Console.WriteLine($"=== شروع تست بار سنگین لاگر ===");
+        Console.WriteLine($"تعداد نخ‌ها: {threadCount}");
+        Console.WriteLine($"پیام‌ها در هر نخ: {messagesPerThread}");
+        Console.WriteLine($"مدت زمان تست: {testDurationMs} میلی‌ثانیه");
+        Console.WriteLine($"استفاده از آبجکت‌های پیچیده: {useComplexObjects}");
         Console.WriteLine();
-        Logger.Initialize("ExtremeStressTest", true, true);
-        CleanupPreviousLogs();
-        var testResults = new StressTestResults();
+
+        // Initialize logger with temp directory if provided
+        if (!string.IsNullOrEmpty(tempLogDir))
+        {
+            Logger.Initialize(tempLogDir, true);
+        }
+
+        // Capture initial metrics
+        var initialMetrics = Logger.GetMetrics();
         var stopwatch = Stopwatch.StartNew();
+        var cts = new CancellationTokenSource();
+        var tasks = new List<Task>();
+        var threadStats = new ThreadStats[threadCount];
+        var readyEvent = new CountdownEvent(threadCount);
 
-        try
-        {
-            TestMassiveConcurrentLogging(testResults);
-            TestContinuousHighVolumeLogging(testResults);
-            TestLargeObjectSerialization(testResults);
-            TestMixedWorkloadWithBackupTrigger(testResults);
-            TestFinalFlushAndBackupVerification(testResults);
-        }
-        finally
-        {
-            stopwatch.Stop();
-            testResults.TotalDuration = stopwatch.Elapsed;
-            PrintTestResults(testResults);
-            Logger.Shutdown();
-            Console.WriteLine("=== Extreme Stress Test Completed ===");
-        }
-    }
-
-    private static void CleanupPreviousLogs()
-    {
-        try
-        {
-            string logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ExtremeStressTest");
-            if (Directory.Exists(logDir))
-            {
-                Directory.Delete(logDir, true);
-            }
-        }
-        catch { /* Ignore cleanup errors */ }
-    }
-
-    private static void TestMassiveConcurrentLogging(StressTestResults results)
-    {
-        Console.WriteLine("1. Testing MASSIVE Concurrent Logging (100+ threads)...");
-
-        int threadCount = 100;
-        int messagesPerThread = 2000; // 200000 message
-        var threads = new List<Thread>();
-        var startSignal = new ManualResetEvent(false);
-
-        results.TotalMessages += threadCount * messagesPerThread;
-
+        // Create and start tasks
         for (int i = 0; i < threadCount; i++)
         {
             int threadId = i;
-            var thread = new Thread(() =>
+            threadStats[threadId] = new ThreadStats();
+
+            tasks.Add(Task.Run(() =>
             {
-                startSignal.WaitOne();
-
-                for (int j = 0; j < messagesPerThread; j++)
+                try
                 {
-                    string message = $"[THREAD{threadId:000}] Message {j:0000} - " +
-                                    $"This is a detailed log message designed to fill up the log file quickly. " +
-                                    $"Timestamp: {DateTime.UtcNow:HH:mm:ss.fff} - " +
-                                    $"Thread: {Thread.CurrentThread.ManagedThreadId} - " +
-                                    $"Iteration: {j} - " +
-                                    $"RandomData: {Guid.NewGuid()}";
+                    // Signal that the thread is ready
+                    readyEvent.Signal();
+                    // Wait for all threads to be ready
+                    readyEvent.Wait();
 
-                    Logger.LogInfo(message, $"Worker{threadId}", $"StressTest.cs", j + 1);
-                    if (j % 250 == 0)
+                    var threadStopwatch = Stopwatch.StartNew();
+                    var random = new Random(threadId);
+
+                    for (int j = 0; j < messagesPerThread; j++)
                     {
-                        Thread.Yield();
-                    }
-                }
-            })
-            {
-                Priority = ThreadPriority.AboveNormal
-            };
+                        if (cts.Token.IsCancellationRequested || stopwatch.ElapsedMilliseconds > testDurationMs)
+                            break;
 
-            threads.Add(thread);
-            thread.Start();
-        }
+                        // Alternate between different log methods
+                        int logType = j % 5;
+                        string message = $"Thread {threadId} - Message {j}";
 
-        Console.WriteLine($"   → Started {threadCount} threads, each sending {messagesPerThread} messages...");
-        startSignal.Set();
-        foreach (var thread in threads)
-        {
-            if (!thread.Join(TimeSpan.FromMinutes(2)))
-            {
-                Console.WriteLine($"   ⚠ Thread {thread.ManagedThreadId} timed out");
-            }
-        }
-
-        results.MassiveConcurrentTested = true;
-        Console.WriteLine($"   → Completed: {threadCount * messagesPerThread:N0} messages");
-    }
-
-    private static void TestContinuousHighVolumeLogging(StressTestResults results)
-    {
-        Console.WriteLine("2. Testing Continuous High Volume Logging...");
-
-        int totalMessages = 50000;
-        results.TotalMessages += totalMessages;
-        int batchSize = 1000;
-
-        for (int batch = 0; batch < totalMessages / batchSize; batch++)
-        {
-            Parallel.For(0, batchSize, i =>
-            {
-                int messageId = batch * batchSize + i;
-
-                var logData = new
-                {
-                    MessageId = messageId,
-                    Batch = batch,
-                    Index = i,
-                    Timestamp = DateTime.UtcNow,
-                    Data = new byte[512], // داده با حجم متوسط
-                    Metadata = new
-                    {
-                        Source = "StressTest",
-                        Type = "Performance",
-                        Priority = "High",
-                        Tags = new[] { "stress", "test", "performance", "high-volume" },
-                        AdditionalInfo = $"This is message {messageId} in batch {batch}"
-                    }
-                };
-
-                Logger.LogInfo(logData);
-                if (messageId % 1000 == 0)
-                {
-                    Console.WriteLine($"   → Progress: {messageId:N0}/{totalMessages:N0} messages");
-                }
-            });
-            Thread.Sleep(100);
-        }
-
-        results.HighVolumeTested = true;
-        Console.WriteLine($"   → Completed: {totalMessages:N0} high-volume messages");
-    }
-
-    private static void TestLargeObjectSerialization(StressTestResults results)
-    {
-        Console.WriteLine("3. Testing Large Object Serialization (Forcing Backup)...");
-
-        int largeMessageCount = 1000;
-        results.TotalMessages += largeMessageCount;
-
-        for (int i = 0; i < largeMessageCount; i++)
-        {
-            // ایجاد اشیاء بسیار بزرگ برای پر کردن سریع فایل
-            var hugeObject = new
-            {
-                Id = i,
-                CreatedAt = DateTime.UtcNow,
-                LargeData = new
-                {
-                    Array1 = Enumerable.Range(0, 1000).ToArray(),
-                    Array2 = Enumerable.Range(0, 500).Select(x => x * 2).ToArray(),
-                    Nested = new
-                    {
-                        Level1 = new
+                        switch (logType)
                         {
-                            Level2 = new
-                            {
-                                Level3 = new
+                            case 0:
+                                Logger.LogInfo(message);
+                                threadStats[threadId].InfoCount++;
+                                break;
+                            case 1:
+                                Logger.LogError(new Exception($"Test error {j} from thread {threadId}"));
+                                threadStats[threadId].ErrorCount++;
+                                break;
+                            case 2:
+                                if (useComplexObjects)
                                 {
-                                    Data = new string('X', 1000), // رشته بسیار طولانی
-                                    Items = Enumerable.Range(0, 200).Select(n => new
-                                    {
-                                        ItemId = n,
-                                        Name = $"Item {n}",
-                                        Value = n * 1.5,
-                                        Description = $"This is a detailed description for item {n} " +
-                                                     $"that should take up significant space in the log file. " +
-                                                     $"Additional text to increase size: {Guid.NewGuid()}"
-                                    }).ToArray()
+                                    var complexObj = CreateComplexObject(threadId, j, random);
+                                    Logger.LogRequest(complexObj);
                                 }
-                            }
+                                else
+                                {
+                                    Logger.LogRequest($"Simple request {j}");
+                                }
+                                threadStats[threadId].RequestCount++;
+                                break;
+                            case 3:
+                                if (useComplexObjects)
+                                {
+                                    var complexObj = CreateComplexObject(threadId, j, random);
+                                    Logger.LogResponse(complexObj);
+                                }
+                                else
+                                {
+                                    Logger.LogResponse($"Simple response {j}");
+                                }
+                                threadStats[threadId].ResponseCount++;
+                                break;
+                            case 4:
+                                Logger.LogStart($"Start operation {j}");
+                                threadStats[threadId].StartCount++;
+                                break;
                         }
-                    },
-                    Metadata = new Dictionary<string, object>
-                    {
-                        ["category"] = "large-object-test",
-                        ["size"] = "extra-large",
-                        ["purpose"] = "force-log-backup",
-                        ["timestamp"] = DateTime.UtcNow.Ticks,
-                        ["additional"] = new
+
+                        threadStats[threadId].TotalMessages++;
+
+                        // Simulate some processing time
+                        if (j % 100 == 0)
                         {
-                            Info1 = "Value1",
-                            Info2 = 12345,
-                            Info3 = new[] { "a", "b", "c", "d", "e" },
-                            Info4 = DateTime.UtcNow
+                            Thread.Sleep(random.Next(1, 5));
                         }
                     }
-                },
-                Footer = new
-                {
-                    Message = "This is the end of a very large log object designed to fill the log file quickly",
-                    Checksum = Guid.NewGuid(),
-                    Validation = new { IsValid = true, Reason = "Stress test" }
+
+                    threadStopwatch.Stop();
+                    threadStats[threadId].ElapsedMs = threadStopwatch.ElapsedMilliseconds;
                 }
-            };
-
-            Logger.LogInfo(hugeObject);
-
-            // گزارش پیشرفت
-            if (i % 100 == 0)
-            {
-                Console.WriteLine($"   → Large objects: {i}/{largeMessageCount}");
-                CheckForBackupFiles(results);
-            }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"خطا در نخ {threadId}: {ex.Message}");
+                    threadStats[threadId].ErrorCount++;
+                }
+            }, cts.Token));
         }
 
-        results.LargeObjectTested = true;
-        Console.WriteLine($"   → Completed: {largeMessageCount:N0} large objects");
-    }
-
-    private static void TestMixedWorkloadWithBackupTrigger(StressTestResults results)
-    {
-        Console.WriteLine("4. Testing Mixed Workload to Trigger Multiple Backups...");
-
-        int operationCount = 30000;
-        results.TotalMessages += operationCount;
-        var random = new Random();
-
-        for (int i = 0; i < operationCount; i++)
-        {
-            switch (i % 8)
-            {
-                case 0:
-                    // لاگ‌های بسیار طولانی
-                    string longMessage = new string('*', 1000) +
-                                        $" MESSAGE {i} " +
-                                        new string('*', 1000) +
-                                        $" DETAILS: {Guid.NewGuid()} {DateTime.UtcNow:O}";
-                    Logger.LogInfo(longMessage);
-                    break;
-
-                case 1:
-                    Logger.LogInfo(new
-                    {
-                        Type = "Complex",
-                        Id = i,
-                        Data = Enumerable.Range(0, 100).ToDictionary(x => $"Key{x}", x => x),
-                        Nested = new
-                        {
-                            Level = 1,
-                            Items = Enumerable.Range(0, 50).Select(x => new { Index = x, Value = x * 2 })
-                        }
-                    });
-                    break;
-
-                case 2:
-                    try
-                    {
-                        throw new InvalidOperationException($"Simulated error for stress testing #{i} " +
-                                                           $"with additional details: {Guid.NewGuid()}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.LogError(ex);
-                    }
-                    break;
-
-                default:
-                    Logger.LogInfo($"Mixed workload message #{i} - " +
-                                  $"Thread: {Thread.CurrentThread.ManagedThreadId} - " +
-                                  $"Time: {DateTime.UtcNow:HH:mm:ss.fff} - " +
-                                  $"Random: {random.NextDouble()} - " +
-                                  $"Guid: {Guid.NewGuid()}");
-                    break;
-            }
-            if (i % 500 == 0)
-            {
-                CheckForBackupFiles(results);
-                Console.WriteLine($"   → Progress: {i:N0}/{operationCount:N0}, Backups: {results.BackupFilesCreated}");
-            }
-            if (i % 1000 == 0)
-            {
-                GC.Collect(0, GCCollectionMode.Default, false);
-                Thread.Yield();
-            }
-        }
-
-        results.MixedWorkloadTested = true;
-        Console.WriteLine($"   → Completed: {operationCount:N0} mixed operations");
-    }
-
-    private static void TestFinalFlushAndBackupVerification(StressTestResults results)
-    {
-        Console.WriteLine("5. Final Flush and Backup Verification...");
-        int finalBatch = 5000;
-        results.TotalMessages += finalBatch;
-
-        Parallel.For(0, finalBatch, i =>
-        {
-            Logger.LogInfo($"FINAL_MESSAGE_{i}_" + new string('Z', 500) +
-                          $"_{DateTime.UtcNow:yyyyMMdd_HHmmssfff}_{Guid.NewGuid()}");
-        });
-        CheckForBackupFiles(results);
-        results.FinalFlushTested = true;
-        Console.WriteLine($"   → Completed: Final flush with {finalBatch:N0} messages");
-        Console.WriteLine($"   → Total backups created: {results.BackupFilesCreated}");
-    }
-
-    private static void CheckForBackupFiles(StressTestResults results)
-    {
+        // Wait for all tasks to complete or timeout
         try
         {
-            string logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ExtremeStressTest");
-            if (Directory.Exists(logDir))
-            {
-                var backupFiles = Directory.GetFiles(logDir, "backup_application_log_*.txt");
-                results.BackupFilesCreated = Math.Max(results.BackupFilesCreated, backupFiles.Length);
+            Task.WhenAll(tasks).Wait(testDurationMs);
+        }
+        catch (AggregateException)
+        {
+            // Ignore aggregate exceptions
+        }
 
-                if (backupFiles.Length > 0 && !results.BackupVerified)
+        // Cancel any remaining tasks
+        cts.Cancel();
+
+        // Wait for logger to flush
+        WaitForLoggerToFlush();
+
+        // Capture final metrics
+        var finalMetrics = Logger.GetMetrics();
+        stopwatch.Stop();
+
+        // Calculate statistics
+        long totalExpected = (long)threadCount * messagesPerThread;
+        long totalLogged = finalMetrics.TotalLogsWritten - initialMetrics.TotalLogsWritten;
+        long dropped = finalMetrics.DroppedLogsCount - initialMetrics.DroppedLogsCount;
+        long writeErrors = finalMetrics.WriteErrorsCount - initialMetrics.WriteErrorsCount;
+        long selfRepairActions = finalMetrics.SelfRepairActionsCount - initialMetrics.SelfRepairActionsCount;
+        long circuitBreakerTrips = finalMetrics.CircuitBreakerTrippedCount - initialMetrics.CircuitBreakerTrippedCount;
+        int restarts = finalMetrics.RestartCount - initialMetrics.RestartCount;
+
+        // Calculate thread statistics
+        long totalThreadMessages = 0;
+        double avgThreadTime = 0;
+        for (int i = 0; i < threadCount; i++)
+        {
+            totalThreadMessages += threadStats[i].TotalMessages;
+            avgThreadTime += threadStats[i].ElapsedMs;
+        }
+        avgThreadTime /= threadCount;
+
+        // Display results
+        Console.WriteLine("\n=== نتایج تست بار سنگین ===");
+        Console.WriteLine($"زمان کل اجرا: {stopwatch.ElapsedMilliseconds} میلی‌ثانیه");
+        Console.WriteLine($"تعداد کل پیام‌های تولید شده: {totalExpected:N0}");
+        Console.WriteLine($"تعداد کل پیام‌های لاگ شده: {totalLogged:N0}");
+        Console.WriteLine($"تعداد پیام‌های حذف شده: {dropped:N0}");
+        Console.WriteLine($"تعداد خطاهای نوشتن: {writeErrors:N0}");
+        Console.WriteLine($"تعداد عملیات تعمیر خودکار: {selfRepairActions:N0}");
+        Console.WriteLine($"تعداد فعال‌سازی Circuit Breaker: {circuitBreakerTrips:N0}");
+        Console.WriteLine($"تعداد راه‌اندازی مجدد لاگر: {restarts:N0}");
+        Console.WriteLine($"میانگین زمان نوشتن: {finalMetrics.AverageWriteTimeMs:F2} میلی‌ثانیه");
+        Console.WriteLine($"بار نهایی صف: {finalMetrics.QueueLoadPercent}%");
+        Console.WriteLine($"میانگین زمان اجرای هر نخ: {avgThreadTime:F2} میلی‌ثانیه");
+
+        // Calculate success rate
+        double successRate = totalExpected > 0 ? (double)(totalExpected - dropped) / totalExpected * 100 : 0;
+        Console.WriteLine($"نرخ موفقیت: {successRate:F2}%");
+
+        // Display warnings if any
+        if (dropped > 0)
+            Console.WriteLine($"⚠️ هشدار: {dropped:N0} پیام حذف شد!");
+        if (writeErrors > 0)
+            Console.WriteLine($"⚠️ هشدار: {writeErrors:N0} خطای نوشتن رخ داد!");
+        if (restarts > 0)
+            Console.WriteLine($"⚠️ هشدار: لاگر {restarts} بار راه‌اندازی مجدد شد!");
+        if (successRate < 95)
+            Console.WriteLine($"⚠️ هشدار: نرخ موفقیت کمتر از 95% است!");
+
+        // Display per-thread statistics
+        Console.WriteLine("\n=== آمار هر نخ ===");
+        for (int i = 0; i < threadCount; i++)
+        {
+            var stats = threadStats[i];
+            Console.WriteLine($"نخ {i}: پیام‌ها={stats.TotalMessages:N0}, " +
+                           $"Info={stats.InfoCount:N0}, Error={stats.ErrorCount:N0}, " +
+                           $"Request={stats.RequestCount:N0}, Response={stats.ResponseCount:N0}, " +
+                           $"Start={stats.StartCount:N0}, زمان={stats.ElapsedMs:F2}ms");
+        }
+
+        Console.WriteLine("\n=== تست کامل شد ===");
+    }
+
+    /// <summary>
+    /// منتظر می‌ماند تا لاگر تمام پیام‌ها را پردازش کند
+    /// </summary>
+    private static void WaitForLoggerToFlush(int timeoutMs = 60000)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var lastQueueCount = -1;
+        var noProgressCount = 0;
+
+        while (stopwatch.ElapsedMilliseconds < timeoutMs)
+        {
+            var metrics = Logger.GetMetrics();
+
+            // Check if queue is empty
+            if (metrics.QueueLoadPercent == 0)
+            {
+                Console.WriteLine($"✅ صف خالی شد بعد از {stopwatch.ElapsedMilliseconds}ms");
+                return;
+            }
+
+            // Check if we're making progress
+            if (metrics.QueueLoadPercent == lastQueueCount)
+            {
+                noProgressCount++;
+                if (noProgressCount > 10) // No progress for 10 checks
                 {
-                    results.BackupVerified = true;
-                    Console.WriteLine($"  BACKUP CREATED! Files: {backupFiles.Length}");
-                    foreach (var backupFile in backupFiles.Take(3))
-                    {
-                        var fileInfo = new FileInfo(backupFile);
-                        Console.WriteLine($" {fileInfo.Name} - {fileInfo.Length / 1024 / 1024}MB");
-                    }
+                    Console.WriteLine($"⚠️ صف پیشرفت نمی‌کند. بار فعلی: {metrics.QueueLoadPercent}%");
+                    break;
                 }
             }
+            else
+            {
+                noProgressCount = 0;
+                lastQueueCount = metrics.QueueLoadPercent;
+            }
+
+            Thread.Sleep(500);
         }
-        catch { /* Ignore monitoring errors */ }
+
+        Console.WriteLine($"⏱️ زمان انتظار برای خالی شدن صف تمام شد. بار فعلی: {Logger.GetMetrics().QueueLoadPercent}%");
     }
 
-    private static void PrintTestResults(StressTestResults results)
+    /// <summary>
+    /// ایجاد یک آبجکت پیچیده برای تست
+    /// </summary>
+    private static ComplexObject CreateComplexObject(int threadId, int messageId, Random random)
     {
-        Console.WriteLine();
-        Console.WriteLine("=== EXTREME STRESS TEST RESULTS ===");
-        Console.WriteLine($"Total Duration: {results.TotalDuration}");
-        Console.WriteLine($"Total Messages: {results.TotalMessages:N0}");
-        Console.WriteLine($"Messages per Second: {results.TotalMessages / results.TotalDuration.TotalSeconds:N0}");
-        Console.WriteLine($"Backup Files Created: {results.BackupFilesCreated}");
-        Console.WriteLine($"Peak Memory Usage: {GC.GetTotalMemory(true) / 1024 / 1024} MB");
-
-        Console.WriteLine();
-        Console.WriteLine("Tests Completed:");
-        Console.WriteLine($" Massive Concurrent: {(results.MassiveConcurrentTested ? "PASS" : "FAIL")}");
-        Console.WriteLine($" High Volume: {(results.HighVolumeTested ? "PASS" : "FAIL")}");
-        Console.WriteLine($" Large Objects: {(results.LargeObjectTested ? "PASS" : "FAIL")}");
-        Console.WriteLine($" Mixed Workload: {(results.MixedWorkloadTested ? "PASS" : "FAIL")}");
-        Console.WriteLine($" Final Flush: {(results.FinalFlushTested ? "PASS" : "FAIL")}");
-        Console.WriteLine($" Backup Created: {(results.BackupVerified ? "YES" : "NO")}");
-
-        Console.WriteLine();
-        Console.WriteLine("Performance Analysis:");
-        double msgPerSec = results.TotalMessages / results.TotalDuration.TotalSeconds;
-
-        if (msgPerSec > 1000)
-            Console.WriteLine($"Throughput: EXCELLENT ({msgPerSec:N0} msg/sec)");
-        else if (msgPerSec > 500)
-            Console.WriteLine($"Throughput: GOOD ({msgPerSec:N0} msg/sec)");
-        else
-            Console.WriteLine($"Throughput: MODERATE ({msgPerSec:N0} msg/sec)");
-
-        if (results.BackupFilesCreated > 0)
-            Console.WriteLine("Backup System: WORKING");
-        else
-            Console.WriteLine("Backup System: NOT TRIGGERED");
-
-        Console.WriteLine();
-        Console.WriteLine("Logger Status:  EXTREME LOAD READY");
+        return new ComplexObject
+        {
+            ThreadId = threadId,
+            MessageId = messageId,
+            Timestamp = DateTime.UtcNow,
+            Data = new string('X', random.Next(100, 1000)),
+            NestedObject = new NestedObject
+            {
+                Value = random.NextDouble(),
+                Items = Enumerable.Range(0, random.Next(5, 20))
+                    .Select(i => $"Item-{i}-{random.Next(1000)}")
+                    .ToArray()
+            },
+            Metadata = new Dictionary<string, object>
+            {
+                ["ThreadId"] = threadId,
+                ["MessageId"] = messageId,
+                ["Random"] = random.Next(10000)
+            }
+        };
     }
 
-    // کلاس نتایج تست
-    private class StressTestResults
+    /// <summary>
+    /// کلاس برای نگهداری آمار هر نخ
+    /// </summary>
+    private class ThreadStats
     {
-        public TimeSpan TotalDuration { get; set; }
-        public int TotalMessages { get; set; }
-        public int BackupFilesCreated { get; set; }
-        public bool BackupVerified { get; set; }
-        public bool MassiveConcurrentTested { get; set; }
-        public bool HighVolumeTested { get; set; }
-        public bool LargeObjectTested { get; set; }
-        public bool MixedWorkloadTested { get; set; }
-        public bool FinalFlushTested { get; set; }
+        public long TotalMessages { get; set; }
+        public long InfoCount { get; set; }
+        public long ErrorCount { get; set; }
+        public long RequestCount { get; set; }
+        public long ResponseCount { get; set; }
+        public long StartCount { get; set; }
+        public long ElapsedMs { get; set; }
+    }
+
+    /// <summary>
+    /// آبجکت پیچیده برای تست
+    /// </summary>
+    private class ComplexObject
+    {
+        public int ThreadId { get; set; }
+        public int MessageId { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string Data { get; set; }
+        public NestedObject NestedObject { get; set; }
+        public Dictionary<string, object> Metadata { get; set; }
+    }
+
+    /// <summary>
+    /// آبجکت تو در تو برای تست
+    /// </summary>
+    private class NestedObject
+    {
+        public double Value { get; set; }
+        public string[] Items { get; set; }
+    }
+
+    /// <summary>
+    /// تست عملکرد لاگر با سناریوهای مختلف
+    /// </summary>
+    public static void RunPerformanceTests()
+    {
+        Console.WriteLine("=== شروع تست‌های عملکردی لاگر ===\n");
+
+        // Test 1: Basic load test
+        Console.WriteLine("تست 1: بار پایین (5 نخ، 1000 پیام)");
+        SimulateHighLoad(threadCount: 5, messagesPerThread: 1000, testDurationMs: 10000);
+        Console.WriteLine();
+
+        // Test 2: Medium load test
+        Console.WriteLine("تست 2: بار متوسط (10 نخ، 5000 پیام)");
+        SimulateHighLoad(threadCount: 10, messagesPerThread: 5000, testDurationMs: 20000);
+        Console.WriteLine();
+
+        // Test 3: High load test
+        Console.WriteLine("تست 3: بار بالا (20 نخ، 10000 پیام)");
+        SimulateHighLoad(threadCount: 20, messagesPerThread: 10000, testDurationMs: 30000);
+        Console.WriteLine();
+
+        // Test 4: Extreme load test
+        Console.WriteLine("تست 4: بار بسیار بالا (50 نخ، 20000 پیام)");
+        SimulateHighLoad(threadCount: 50, messagesPerThread: 20000, testDurationMs: 45000);
+        Console.WriteLine();
+
+        // Test 5: Complex objects test
+        Console.WriteLine("تست 5: آبجکت‌های پیچیده (10 نخ، 5000 پیام)");
+        SimulateHighLoad(threadCount: 10, messagesPerThread: 5000, testDurationMs: 20000, useComplexObjects: true);
+        Console.WriteLine();
+
+        // Test 6: Temporary directory test
+        string tempDir = Path.Combine(Path.GetTempPath(), "LoggerTest_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+        Console.WriteLine($"تست 6: استفاده از دایرکتوری موقت ({tempDir})");
+        SimulateHighLoad(threadCount: 15, messagesPerThread: 3000, testDurationMs: 15000, tempLogDir: tempDir);
+        Console.WriteLine();
+
+        Console.WriteLine("=== تمام تست‌های عملکردی کامل شد ===");
     }
 }
 
-// روش استفاده:
-// LoggerStressTester.RunExtremeStressTest();
+
+////نحوه تست
+//LoggerTest.SimulateHighLoad();
+//// تست با 50 نخ، 10000 پیام و آبجکت‌های پیچیده
+//LoggerTest.SimulateHighLoad(
+//    threadCount: 50,
+//    messagesPerThread: 10000,
+//    testDurationMs: 60000,
+//    useComplexObjects: true,
+//    tempLogDir: @"C:\Temp\LoggerTest"
+//);
+
