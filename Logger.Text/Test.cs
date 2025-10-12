@@ -34,7 +34,13 @@ public static class LoggerTest
         // Initialize logger with temp directory if provided
         if (!string.IsNullOrEmpty(tempLogDir))
         {
+            
+
             Logger.Initialize(tempLogDir, true);
+        }
+        else
+        {
+            Logger.Initialize();
         }
 
         // Capture initial metrics
@@ -86,11 +92,11 @@ public static class LoggerTest
                                 if (useComplexObjects)
                                 {
                                     var complexObj = CreateComplexObject(threadId, j, random);
-                                    Logger.LogRequest(complexObj);
+                                    Logger.LogInfo(complexObj);
                                 }
                                 else
                                 {
-                                    Logger.LogRequest($"Simple request {j}");
+                                    Logger.LogInfo($"Simple request {j}");
                                 }
                                 threadStats[threadId].RequestCount++;
                                 break;
@@ -98,16 +104,16 @@ public static class LoggerTest
                                 if (useComplexObjects)
                                 {
                                     var complexObj = CreateComplexObject(threadId, j, random);
-                                    Logger.LogResponse(complexObj);
+                                    Logger.LogInfo(complexObj);
                                 }
                                 else
                                 {
-                                    Logger.LogResponse($"Simple response {j}");
+                                    Logger.LogInfo($"Simple response {j}");
                                 }
                                 threadStats[threadId].ResponseCount++;
                                 break;
                             case 4:
-                                Logger.LogStart($"Start operation {j}");
+                                Logger.LogInfo($"Start operation {j}");
                                 threadStats[threadId].StartCount++;
                                 break;
                         }
