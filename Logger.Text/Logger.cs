@@ -1026,7 +1026,6 @@ public static class Logger
         }
         catch (Exception mEx) { SafeFallbackLog("Failed to save logger config", mEx); }
     }
-    // درون کلاس Logger، متد GetHtmlTemplate را به طور کامل با این نسخه جایگزین کنید
     private static string GetHtmlTemplate()
     {
         return @"
